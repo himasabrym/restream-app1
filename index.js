@@ -410,18 +410,19 @@ async function spawnStream(id) {
     return;
   }
 
-  // لازم يكون عندنا output
+  // لازم يكون عندنا Output
   if (!ch.output) {
     console.log(`[${id}] ❌ لا يوجد Output للقناة`);
+
     logEvent(
       id,
       "exit",
       "تعذر تشغيل القناة: لا يوجد رابط Output"
     );
+
     return;
   }
 
-  // وضع القناة في حالة بدء
   startingStreams[id] = true;
 
   try {
@@ -432,6 +433,7 @@ async function spawnStream(id) {
     let resolvedInput;
 
     try {
+
       resolvedInput = await resolveInputUrl(
         id,
         ch.input
@@ -464,29 +466,37 @@ async function spawnStream(id) {
     }
 
     // ====================================
-    // 🎚️ الجودة
+    // 🎚️ QUALITY
     // ====================================
     const q = getQualityPreset(ch);
 
     // ====================================
-    // 📡 تحديد هل القناة Jaco
+    // 📡 PROTOCOL
     // ====================================
+    const protocol =
+      ch.protocol ||
+      (
+        (ch.output || "")
+          .toLowerCase()
+          .includes("/jaco/")
+          ? "jaco"
+          : "rtmp"
+      );
+
     const isJaco =
-      ch.protocol === "jaco";
+      protocol === "jaco";
 
-    if (isJaco) {
-      console.log(
-        `[${id}] 📡 JACO RTMP OUTPUT`
-      );
+    console.log(
+      `[${id}] 📡 PROTOCOL: ${isJaco ? "JACO" : "RTMP"}`
+    );
 
-      console.log(
-        `[${id}] 🎥 الجودة: ${q.scale}`
-      );
+    console.log(
+      `[${id}] 🎥 QUALITY: ${q.scale}`
+    );
 
-      console.log(
-        `[${id}] 📊 Bitrate: ${q.bitrate}`
-      );
-    }
+    console.log(
+      `[${id}] 📊 VIDEO BITRATE: ${q.bitrate}`
+    );
 
     // ====================================
     // ▶ START
@@ -499,14 +509,12 @@ async function spawnStream(id) {
       id,
       "start",
       isJaco
-        ? "تم تشغيل قناة Jaco"
+        ? "تم تشغيل قناة JACO"
         : "تم تشغيل القناة"
     );
 
-    // أي تشغيل جديد يلغي حالة الإيقاف اليدوي
     manuallyStopped[id] = false;
 
-    // بداية جلسة بث جديدة
     liveSince[id] = Date.now();
 
     if (totalOnairMs[id] == null) {
@@ -516,14 +524,15 @@ async function spawnStream(id) {
     lastBitrateKbps[id] = null;
 
     // ====================================
-    // 🎬 FFmpeg ARGUMENTS
+    // 🎬 FFMPEG ARGUMENTS
     // ====================================
     const ffmpegArgs = [
 
-      // قراءة البث في الوقت الحقيقي
+      // ----------------------------------
+      // INPUT LIVE
+      // ----------------------------------
       "-re",
 
-      // إعادة الاتصال بمصدر HTTP/HLS
       "-reconnect",
       "1",
 
@@ -533,39 +542,71 @@ async function spawnStream(id) {
       "-reconnect_delay_max",
       "5",
 
-      // ==================================
-      // INPUT
-      // ==================================
       "-i",
-      resolvedInput,
+      resolvedInput
 
-      // ==================================
-      // LOGO
-      // ==================================
-      // loop يجعل صورة اللوجو مستمرة طوال البث
-      "-loop",
-      "1",
+    ];
 
-      "-i",
-      getLogo(id),
+    // ====================================
+    // 🖼️ LOGO
+    // ====================================
+    const logo = getLogo(id);
 
-      // ==================================
-      // VIDEO FILTER
-      // ==================================
-      "-filter_complex",
+    if (logo) {
 
-      `[0:v]scale=${q.scale}:force_original_aspect_ratio=decrease,pad=${q.scale}:(ow-iw)/2:(oh-ih)/2[base];[1:v]scale=220:-1[logo];[base][logo]overlay=W-w-20:20:format=auto[vout]`,
+      ffmpegArgs.push(
 
-      // ==================================
-      // VIDEO ENCODING
-      // ==================================
-      "-map",
-      "[vout]",
+        "-loop",
+        "1",
 
-      // الصوت اختياري
+        "-i",
+        logo
+
+      );
+
+    }
+
+    // ====================================
+    // 🎨 VIDEO FILTER
+    // ====================================
+    if (logo) {
+
+      ffmpegArgs.push(
+
+        "-filter_complex",
+
+        `[0:v]scale=${q.scale}:force_original_aspect_ratio=decrease,pad=${q.scale}:(ow-iw)/2:(oh-ih)/2[base];[1:v]scale=220:-1[logo];[base][logo]overlay=W-w-20:20:format=auto[vout]`,
+
+        "-map",
+        "[vout]"
+
+      );
+
+    } else {
+
+      ffmpegArgs.push(
+
+        "-vf",
+        `scale=${q.scale}:force_original_aspect_ratio=decrease,pad=${q.scale}:(ow-iw)/2:(oh-ih)/2`,
+
+        "-map",
+        "0:v"
+
+      );
+
+    }
+
+    // ====================================
+    // 🔊 AUDIO
+    // ====================================
+    ffmpegArgs.push(
+
       "-map",
       "0:a?",
 
+      // ==================================
+      // 🎥 VIDEO ENCODER
+      // ==================================
       "-c:v",
       "libx264",
 
@@ -600,7 +641,7 @@ async function spawnStream(id) {
       "50",
 
       // ==================================
-      // AUDIO
+      // 🔊 AUDIO ENCODER
       // ==================================
       "-c:a",
       "aac",
@@ -609,41 +650,65 @@ async function spawnStream(id) {
       "128k",
 
       "-ar",
-      "44100",
-
-      // ==================================
-      // RTMP / FLV
-      // ==================================
-      "-f",
-      "flv",
-
-      ch.output
-    ];
+      "44100"
+    );
 
     // ====================================
-    // 📡 JACO إضافات خاصة بالإخراج
+    // 📡 JACO OUTPUT
     // ====================================
     if (isJaco) {
 
-      // Jaco يستقبل RTMP/FLV
-      // مع إبقاء البث Live وعدم إضافة مدة للملف
-      ffmpegArgs.splice(
-        ffmpegArgs.length - 2,
-        0,
-        "-rtmp_live",
-        "live"
+      console.log(
+        `[${id}] 📡 تجهيز إخراج JACO RTMP/FLV`
       );
 
-      ffmpegArgs.splice(
-        ffmpegArgs.length - 2,
-        0,
+      ffmpegArgs.push(
+
+        // المحافظة على البث Live
+        "-rtmp_live",
+        "live",
+
+        // عدم إرسال duration/filesize
         "-flvflags",
-        "no_duration_filesize"
+        "no_duration_filesize",
+
+        // FLV/RTMP
+        "-f",
+        "flv",
+
+        // Output
+        ch.output
+
       );
+
+    } else {
+
+      // ==================================
+      // 📡 NORMAL RTMP OUTPUT
+      // ==================================
+      ffmpegArgs.push(
+
+        "-f",
+        "flv",
+
+        ch.output
+
+      );
+
     }
 
+    // ====================================
+    // 🧾 عرض الأمر في اللوج
+    // ====================================
     console.log(
-      `[${id}] 🚀 تشغيل FFmpeg...`
+      `[${id}] 🚀 FFmpeg COMMAND:`
+    );
+
+    console.log(
+      "ffmpeg " +
+      ffmpegArgs
+        .map(arg => `"${arg}"`)
+        .join(" ")
     );
 
     // ====================================
@@ -661,17 +726,20 @@ async function spawnStream(id) {
       }
     );
 
-    // نحفظ مرجع العملية
+    // ====================================
+    // 💾 حفظ العملية
+    // ====================================
     ffmpegProcesses[id] = ffmpeg;
 
-    // انتهت مرحلة البدء
     delete startingStreams[id];
 
     // ====================================
-    // 📋 FFMPEG STDOUT
+    // 📋 STDOUT
     // ====================================
     ffmpeg.stdout.on("data", (d) => {
-      const text = d.toString();
+
+      const text =
+        d.toString();
 
       console.log(
         `[${id}] STDOUT: ${text}`
@@ -680,23 +748,30 @@ async function spawnStream(id) {
       text
         .split("\n")
         .forEach(line => {
-          const trimmed = line.trim();
+
+          const trimmed =
+            line.trim();
 
           if (trimmed) {
+
             pushLog(
               id,
               trimmed
             );
+
           }
+
         });
+
     });
 
     // ====================================
-    // 📋 FFMPEG STDERR
+    // 📋 STDERR
     // ====================================
     ffmpeg.stderr.on("data", (d) => {
 
-      const text = d.toString();
+      const text =
+        d.toString();
 
       console.log(
         `[${id}] ${text}`
@@ -710,28 +785,35 @@ async function spawnStream(id) {
             line.trim();
 
           if (trimmed) {
+
             pushLog(
               id,
               trimmed
             );
+
           }
+
         });
 
       // ==================================
-      // 📊 قراءة Bitrate الحقيقي
+      // 📊 BITRATE الحقيقي
       // ==================================
-      const match = text.match(
-        /bitrate=\s*([\d.]+)\s*kbits\/s/i
-      );
+      const match =
+        text.match(
+          /bitrate=\s*([\d.]+)\s*kbits\/s/i
+        );
 
       if (match) {
+
         lastBitrateKbps[id] =
           parseFloat(match[1]);
+
       }
+
     });
 
     // ====================================
-    // ❌ ERROR PROCESS
+    // ❌ PROCESS ERROR
     // ====================================
     ffmpeg.on("error", (err) => {
 
@@ -745,24 +827,31 @@ async function spawnStream(id) {
         "FFmpeg ERROR: " +
         err.message
       );
+
     });
 
     // ====================================
-    // 🛑 EXIT
+    // 🛑 PROCESS EXIT
     // ====================================
     ffmpeg.on(
       "exit",
       (code, signal) => {
 
-        // نتأكد إن العملية الخارجة
-        // هي نفس العملية المسجلة حاليًا
-        if (ffmpegProcesses[id] === ffmpeg) {
+        // نتأكد أن العملية الخارجة
+        // هي العملية الحالية
+        if (
+          ffmpegProcesses[id] === ffmpeg
+        ) {
+
           delete ffmpegProcesses[id];
+
         }
 
         delete startingStreams[id];
 
-        // حساب مدة جلسة البث
+        // ==================================
+        // ⏱️ حساب مدة الجلسة
+        // ==================================
         if (liveSince[id]) {
 
           totalOnairMs[id] =
@@ -773,12 +862,14 @@ async function spawnStream(id) {
             );
 
           delete liveSince[id];
+
         }
 
-        lastBitrateKbps[id] = null;
+        lastBitrateKbps[id] =
+          null;
 
         // ==================================
-        // ⏹️ إيقاف يدوي
+        // ⏹️ MANUAL STOP
         // ==================================
         if (manuallyStopped[id]) {
 
@@ -787,10 +878,11 @@ async function spawnStream(id) {
           );
 
           return;
+
         }
 
         // ==================================
-        // ❌ توقف غير متوقع
+        // ❌ UNEXPECTED EXIT
         // ==================================
         console.log(
           `[${id}] ❌ EXIT (unexpected)`,
@@ -825,9 +917,11 @@ async function spawnStream(id) {
             );
 
             spawnStream(id);
+
           }
 
         }, 8000);
+
       }
     );
 
@@ -846,7 +940,9 @@ async function spawnStream(id) {
       "خطأ أثناء تشغيل القناة: " +
       err.message
     );
+
   }
+
 }
 
 // ======================
