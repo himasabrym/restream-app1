@@ -574,8 +574,7 @@ async function spawnStream(id) {
       ffmpegArgs.push(
 
         "-filter_complex",
-
-        `[0:v]scale=${q.scale}:force_original_aspect_ratio=decrease,pad=${q.scale}:(ow-iw)/2:(oh-ih)/2[base];[1:v]scale=220:-1[logo];[base][logo]overlay=W-w-20:20:format=auto[vout]`,
+    `[0:v]scale=${q.scale}:force_original_aspect_ratio=decrease,pad=${q.scale}:(ow-iw)/2:(oh-ih)/2[base];[1:v]scale=-1:3000[logo];[base][logo]overlay=W-w-2:2`,
 
         "-map",
         "[vout]"
