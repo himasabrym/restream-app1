@@ -13,50 +13,38 @@ app.use(express.json());
 // ======================
 let ffmpegProcesses = {};
 
-// يمنع تشغيل نفس القناة أكثر من مرة
-// أثناء انتظار استخراج رابط YouTube أو بدء FFmpeg
-let startingStreams = {};
-
-// تتبع هل القناة اتوقفت يدويًا
-// لمنع إعادة التشغيل التلقائي
+// تتبع هل القناة اتوقفت يدويًا (لمنع إعادة التشغيل التلقائي في الحالة دي)
 let manuallyStopped = {};
 
-// آخر سطور ffmpeg لكل قناة
+// آخر سطور ffmpeg لكل قناة (لعرضها في اللوحة)
 let ffmpegLogs = {};
 const MAX_LOG_LINES = 300;
 
 function pushLog(id, line) {
   if (!ffmpegLogs[id]) ffmpegLogs[id] = [];
-
-  ffmpegLogs[id].push({
-    line,
-    time: new Date().toISOString()
-  });
-
+  ffmpegLogs[id].push({ line, time: new Date().toISOString() });
   if (ffmpegLogs[id].length > MAX_LOG_LINES) {
     ffmpegLogs[id] = ffmpegLogs[id].slice(-MAX_LOG_LINES);
   }
 }
 
 // ======================
-// 📊 مقاييس حقيقية
+// 📊 مقاييس حقيقية (وقت بث فعلي + بت ريت فعلي من ffmpeg)
 // ======================
-let liveSince = {};
-let totalOnairMs = {};
-let lastBitrateKbps = {};
+let liveSince = {};       // id -> timestamp بداية الجلسة الحالية (لو شغالة)
+let totalOnairMs = {};    // id -> إجمالي وقت البث التراكمي بالميلي ثانية
+let lastBitrateKbps = {}; // id -> آخر بت ريت حقيقي اتقرأ من ffmpeg
 
 // ======================
-// 👁️ مشاهدين حقيقيين
+// 👁️ مشاهدين حقيقيين (مبنيين على طلبات فعلية وصلت لسيرفرنا عن طريق /watch/:id)
 // ======================
-let currentViewerLog = {};
-let totalViewerSet = {};
+let currentViewerLog = {}; // id -> Map(ip -> آخر وقت طلب)
+let totalViewerSet = {};   // id -> Set(كل الـ IPs اللي طلبت أي وقت)
+const VIEWER_WINDOW_MS = 20000; // أي IP ماطلبش خلال آخر 20 ثانية بيتشال من "الحالي"
 
-const VIEWER_WINDOW_MS = 20000;
-
-// تنظيف المشاهدين الحاليين
+// تنظيف دوري لقائمة المشاهدين الحاليين
 setInterval(() => {
   const now = Date.now();
-
   for (const id in currentViewerLog) {
     for (const [ip, lastSeen] of currentViewerLog[id]) {
       if (now - lastSeen > VIEWER_WINDOW_MS) {
@@ -66,21 +54,17 @@ setInterval(() => {
   }
 }, 5000);
 
-// ======================
-// 📡 WebSocket Clients
-// ======================
+// عملاء الـ WebSocket المتصلين بالداشبورد
 let clients = [];
 
-// ======================
-// 📝 سجل الأحداث
-// ======================
+// سجل الأحداث (آخر 200 حدث فقط)
 let eventLog = [];
 const MAX_EVENTS = 200;
 
 function logEvent(id, type, message) {
   const entry = {
     id,
-    type,
+    type, // start | stop | exit | restart
     message,
     time: new Date().toISOString()
   };
@@ -96,6 +80,7 @@ function logEvent(id, type, message) {
 
 // ======================
 // 🎯 CHANNELS
+// كل قناة ممكن يكون ليها: input, output, logo (رابط صورة), category (تصنيف)
 // ======================
 const channels = {
   chyt1: {
@@ -105,7 +90,6 @@ const channels = {
     category: "",
     watchUrl: ""
   },
-
   ch4k: {
     input: "http://195.182.16.45:8080/live/omar777/01103978590/460864.ts",
     output: "rtmp://live.twitch.tv/app/live_151597255_5HndsveAXExMraoT8RGtn23qCKcVx0",
@@ -113,7 +97,6 @@ const channels = {
     category: "",
     watchUrl: ""
   },
-
   ch1: {
     input: "https://163.ostv.info/krikar/krikar/652333?token=ShJcU0BbQQNHDgxcBwYDCVsBAwdTV1FYCVdTAQABBAtUCAAHCwZTCAAbGBpEF0dcWF1vWQIXXlIJWlcFVEgRR0JVRm1aV0EDRwgBCgRWDAkbHBJED1gBQwtTVQFQXQQKBwUHHhFDCl1HA1pNWw8ZG1xIRFUUWwUNbgYHQQwHVhALXkFeXx9BVgtmUF1aAltdGwoSAUQZRghCEkANCxFfXh0SVltHQQJNABsOVkIPWRUbU19FCEEWGBNYQH40Rh8QVEhAV11AClYLGw4aQxAXFRtZQ28UUBcVQwcDWgAWEQgTABYeEV4CQTpaW1ZZBlZNUF9eQ0QPRlATTkBaCgpaRl5Ca0JaV0EDC0xYVEo=",
     output: "rtmp://vsu.okcdn.ru/input/15037126680149_16572030782037_nwbfmzaoxm",
@@ -121,7 +104,6 @@ const channels = {
     category: "رياضة",
     watchUrl: "https://super-tvlive.vercel.app/SUPERTV_1.m3u8"
   },
-
   ch2: {
     input: "https://163.ostv.info/krikar/krikar/652334?token=ShJcU0BbQQNHDgxcBwYDCVsBAwdTV1FYCVdTAQABBAtUCAAHCwZTCAAbGBpEF0dcWF1vWQIXXlIJWlcFVEgRR0JVRm1aV0EDRwgBCgRWDAkbHBJED1gBQwtTVQFQXQQKBwUHHhFDCl1HA1pNWw8ZG1xIRFUUWwUNbgYHQQwHVhALXkFeXx9BVgtmUF1aAltdGwoSAUQZRghCEkANCxFfXh0SVltHQQJNABsOVkIPWRUbU19FCEEWGBNYQH40Rh8QVEhAV11AClYLGw4aQxAXFRtZQ28UUBcVQwcDWgAWEQgTABYeEV4CQTpaW1ZZBlZNUF9eQ0QPRlATTkBaCgpaRl5Ca0JaV0EDC0xYVEo=",
     output: "rtmp://vsu.okcdn.ru/input/15037158268501_16572084062805_f6sgg23zdy",
@@ -129,7 +111,6 @@ const channels = {
     category: "رياضة",
     watchUrl: "https://super-tvlive.vercel.app/SUPERTV_2.m3u8"
   },
-
   ch3: {
     input: "https://163.ostv.info/krikar/krikar/652335?token=ShJcU0BbQQNHDgxcBwYDCVsBAwdTV1FYCVdTAQABBAtUCAAHCwZTCAAbGBpEF0dcWF1vWQIXXlIJWlcFVEgRR0JVRm1aV0EDRwgBCgRWDAkbHBJED1gBQwtTVQFQXQQKBwUHHhFDCl1HA1pNWw8ZG1xIRFUUWwUNbgYHQQwHVhALXkFeXx9BVgtmUF1aAltdGwoSAUQZRghCEkANCxFfXh0SVltHQQJNABsOVkIPWRUbU19FCEEWGBNYQH40Rh8QVEhAV11AClYLGw4aQxAXFRtZQ28UUBcVQwcDWgAWEQgTABYeEV4CQTpaW1ZZBlZNUF9eQ0QPRlATTkBaCgpaRl5Ca0JaV0EDC0xYVEo=",
     output: "rtmp://vsu.okcdn.ru/input/15651304709717_17641796995669_ozpan4c55m",
@@ -137,7 +118,6 @@ const channels = {
     category: "رياضة",
     watchUrl: "https://super-tvlive.vercel.app/SUPERTV_3.m3u8"
   },
-
   ch4: {
     input: "https://163.ostv.info/krikar/krikar/652336?token=ShJcU0BbQQNHDgxcBwYDCVsBAwdTV1FYCVdTAQABBAtUCAAHCwZTCAAbGBpEF0dcWF1vWQIXXlIJWlcFVEgRR0JVRm1aV0EDRwgBCgRWDAkbHBJED1gBQwtTVQFQXQQKBwUHHhFDCl1HA1pNWw8ZG1xIRFUUWwUNbgYHQQwHVhALXkFeXx9BVgtmUF1aAltdGwoSAUQZRghCEkANCxFfXh0SVltHQQJNABsOVkIPWRUbU19FCEEWGBNYQH40Rh8QVEhAV11AClYLGw4aQxAXFRtZQ28UUBcVQwcDWgAWEQgTABYeEV4CQTpaW1ZZBlZNUF9eQ0QPRlATTkBaCgpaRl5Ca0JaV0EDC0xYVEo=",
     output: "rtmp://vsu.okcdn.ru/input/15651325025877_17641833499221_yp3cn26lt4",
@@ -145,7 +125,6 @@ const channels = {
     category: "رياضة",
     watchUrl: "https://super-tvlive.vercel.app/SUPERTV_4.m3u8"
   },
-
   ch5: {
     input: "http://185.160.192.14/live/171348492752/5S6HGsea3j/255225.m3u8",
     output: "rtmp://vsu.okcdn.ru/input/14863707479574_16379956300310_uoslkp4xrm",
@@ -153,7 +132,6 @@ const channels = {
     category: "",
     watchUrl: ""
   },
-
   ch6: {
     input: "https://ranapkbd.site/RANAPK33g/TVD/play.php?id=1745020",
     output: "rtmp://vsu.okcdn.ru/input/14901168119318_16447213341206_ssfncxg2zu",
@@ -161,7 +139,6 @@ const channels = {
     category: "",
     watchUrl: ""
   },
-
   ch7: {
     input: "https://blc2cr.linkip.org/live/90099_.m3u8?play=",
     output: "rtmp://vsu.okcdn.ru/input/15651334528597_17641850407509_yznfutuhc4",
@@ -169,7 +146,6 @@ const channels = {
     category: "دينية",
     watchUrl: ""
   },
-
   ch8: {
     input: "https://blc2cr.linkip.org/live/90055_.m3u8?play=",
     output: "rtmp://vsu.okcdn.ru/input/15651343638101_17641866463829_ttxdybjs44",
@@ -177,7 +153,6 @@ const channels = {
     category: "أفلام",
     watchUrl: ""
   },
-
   ch9: {
     input: "https://blc2cr.linkip.org/live/90131_.m3u8?play",
     output: "rtmp://vsu.okcdn.ru/input/15651360939605_17641898117717_viq7erszve",
@@ -185,7 +160,6 @@ const channels = {
     category: "مسلسلات",
     watchUrl: ""
   },
-
   ch10: {
     input: "http://185.160.192.14/live/171348492752/5S6HGsea3j/255225.m3u8",
     output: "rtmp://vsu.okcdn.ru/input/14994479390230_16613027809814_7sovqbfsba",
@@ -193,7 +167,6 @@ const channels = {
     category: "أنمي",
     watchUrl: ""
   },
-
   ch11: {
     input: "https://blc2cr.linkip.org/live/90068_.m3u8?play",
     output: "rtmp://vsu.okcdn.ru/input/15651369393749_17641912928853_nzama5i56a",
@@ -201,36 +174,21 @@ const channels = {
     category: "أطفال",
     watchUrl: ""
   },
-
-  // ==============================
-  // 📡 JACO RTMP
-  // ==============================
   ch12: {
     input: "https://blc2cr.linkip.org/live/90068_.m3u8?play",
-
     output: "rtmp://101.46.62.149/jaco/3027109747_1788989642243?anchorUid=3027109747&biz=0&countryCode=EG&key=1820525642243-cba23210caa77d074a7dd8101d086375&pbModeAttach=1&pbModeGap=3&presets=720P&pushFrom=obs&sid=64bbd2a699844a87942e5e630af7108d&src=1&transcodeEnabled=true",
-
-    // تحديد نوع الإخراج
-    protocol: "jaco",
-
     logo: "kids3.png",
     category: "أطفال",
-    watchUrl: "",
-
-    // Jaco عندنا مضبوط على 720p
-    quality: "medium"
+    watchUrl: ""
   }
 };
 
 // ======================
-// 🎬 LOGO
+// 🎬 LOGO (fallback ثابت لو القناة مالهاش لوجو محدد)
 // ======================
 function getLogo(id) {
   const ch = channels[id];
-
-  if (ch && ch.logo) {
-    return ch.logo;
-  }
+  if (ch && ch.logo) return ch.logo;
 
   const logos = {
     ch4k: "logo4kh.png",
@@ -244,14 +202,17 @@ function getLogo(id) {
     ch8: "aflam.png",
     ch9: "mosalsalat.png",
     ch10: "animy.png",
-    ch11: "kids.png"
+    ch11: "kids.png",
   };
 
   return logos[id] || "logo.png";
 }
 
 // ======================
-// 🎚️ QUALITY PRESETS
+// ▶️ يوتيوب: استخراج رابط HLS الحقيقي من رابط بث مباشر على يوتيوب
+// ======================
+// ======================
+// 🎚️ مستويات الجودة (لتقليل حمل المعالج على القنوات الأقل أهمية)
 // ======================
 const QUALITY_PRESETS = {
   high: {
@@ -264,7 +225,6 @@ const QUALITY_PRESETS = {
     level: "4.1",
     fps: "25"
   },
-
   medium: {
     scale: "1280:720",
     bitrate: "2500k",
@@ -275,7 +235,6 @@ const QUALITY_PRESETS = {
     level: "3.1",
     fps: "25"
   },
-
   low: {
     scale: "854:480",
     bitrate: "1200k",
@@ -292,86 +251,40 @@ function getQualityPreset(ch) {
   return QUALITY_PRESETS[ch?.quality] || QUALITY_PRESETS.high;
 }
 
-// ======================
-// ▶️ YOUTUBE URL CHECK
-// ======================
 function isYoutubeUrl(url) {
   try {
-    const host = new URL(url)
-      .hostname
-      .replace(/^www\./, "");
-
-    return (
-      host === "youtube.com" ||
-      host === "youtu.be" ||
-      host === "m.youtube.com"
-    );
+    const host = new URL(url).hostname.replace(/^www\./, "");
+    return host === "youtube.com" || host === "youtu.be" || host === "m.youtube.com";
   } catch (e) {
     return false;
   }
 }
 
-// ======================
-// 🔎 RESOLVE INPUT URL
-// ======================
 async function resolveInputUrl(id, rawInput) {
-  if (!isYoutubeUrl(rawInput)) {
-    return rawInput;
-  }
+  if (!isYoutubeUrl(rawInput)) return rawInput;
 
-  console.log(
-    `[${id}] 🔎 جاري استخراج رابط البث المباشر من يوتيوب (yt-dlp)...`
-  );
+  console.log(`[${id}] 🔎 جاري استخراج رابط البث المباشر من يوتيوب (yt-dlp)...`);
 
   let stdout;
-
   try {
     const result = await execFileAsync(
       "python3",
-      [
-        "-m",
-        "yt_dlp",
-        "-g",
-        "--no-warnings",
-        rawInput
-      ],
-      {
-        timeout: 25000
-      }
+      ["-m", "yt_dlp", "-g", "--no-warnings", rawInput],
+      { timeout: 25000 }
     );
-
     stdout = result.stdout;
-
   } catch (err) {
-    const detail = (
-      err.stderr ||
-      err.message ||
-      ""
-    )
-      .toString()
-      .split("\n")[0];
-
-    throw new Error(
-      "فشل استخراج رابط يوتيوب: " + detail
-    );
+    const detail = (err.stderr || err.message || "").toString().split("\n")[0];
+    throw new Error("فشل استخراج رابط يوتيوب: " + detail);
   }
 
-  const lines = stdout
-    .trim()
-    .split("\n")
-    .map(l => l.trim())
-    .filter(Boolean);
+  const lines = stdout.trim().split("\n").map(l => l.trim()).filter(Boolean);
 
   if (lines.length === 0) {
-    throw new Error(
-      "لم يتم العثور على رابط بث — تأكد إن الفيديو ده بث مباشر شغال فعليًا دلوقتي"
-    );
+    throw new Error("لم يتم العثور على رابط بث — تأكد إن الفيديو ده بث مباشر شغال فعليًا دلوقتي");
   }
 
-  console.log(
-    `[${id}] ✅ تم استخراج رابط يوتيوب بنجاح عن طريق yt-dlp`
-  );
-
+  console.log(`[${id}] ✅ تم استخراج رابط يوتيوب بنجاح عن طريق yt-dlp`);
   return lines[0];
 }
 
@@ -390,558 +303,117 @@ process.on("unhandledRejection", (err) => {
 // 🎬 START STREAM
 // ======================
 async function spawnStream(id) {
-
-  // لو شغالة بالفعل
-  if (ffmpegProcesses[id]) {
-    console.log(`[${id}] ⚠️ القناة تعمل بالفعل`);
-    return;
-  }
-
-  // لو فيه عملية بدء جارية
-  if (startingStreams[id]) {
-    console.log(`[${id}] ⚠️ جاري تشغيل القناة بالفعل`);
-    return;
-  }
+  if (ffmpegProcesses[id]) return;
 
   const ch = channels[id];
+  if (!ch) return;
 
-  if (!ch) {
-    console.log(`[${id}] ❌ القناة غير موجودة`);
-    return;
-  }
-
-  // لازم يكون عندنا Output
-  if (!ch.output) {
-    console.log(`[${id}] ❌ لا يوجد Output للقناة`);
-
-    logEvent(
-      id,
-      "exit",
-      "تعذر تشغيل القناة: لا يوجد رابط Output"
-    );
-
-    return;
-  }
-
-  startingStreams[id] = true;
-
+  // نستخرج الرابط الفعلي (لو رابط يوتيوب، بنحوله لرابط HLS حقيقي)
+  let resolvedInput;
   try {
+    resolvedInput = await resolveInputUrl(id, ch.input);
+  } catch (err) {
+    console.log(`[${id}] 🔥 فشل استخراج رابط البث:`, err.message);
+    logEvent(id, "exit", "تعذر تشغيل القناة: " + err.message);
+    return;
+  }
 
-    // ====================================
-    // 🔎 استخراج رابط الإدخال الحقيقي
-    // ====================================
-    let resolvedInput;
+  // لو القناة اتقفلت أو اتشغلت من مكان تاني أثناء ما كنا بنستخرج الرابط
+  if (ffmpegProcesses[id]) return;
 
-    try {
+  console.log("▶ START:", id);
+  logEvent(id, "start", "تم تشغيل القناة");
 
-      resolvedInput = await resolveInputUrl(
-        id,
-        ch.input
-      );
+  // أي تشغيل (يدوي أو تلقائي) يلغي حالة "متوقفة يدويًا"
+  manuallyStopped[id] = false;
 
-    } catch (err) {
+  // بداية جلسة بث حقيقية جديدة
+  liveSince[id] = Date.now();
+  if (totalOnairMs[id] == null) totalOnairMs[id] = 0;
+  lastBitrateKbps[id] = null;
 
-      console.log(
-        `[${id}] 🔥 فشل استخراج رابط البث:`,
-        err.message
-      );
+  const q = getQualityPreset(ch);
 
-      logEvent(
-        id,
-        "exit",
-        "تعذر تشغيل القناة: " + err.message
-      );
+  const ffmpeg = spawn("ffmpeg", [
+    "-re",
 
-      delete startingStreams[id];
+    "-reconnect", "1",
+    "-reconnect_streamed", "1",
+    "-reconnect_delay_max", "5",
 
-      return;
+    "-i", resolvedInput,
+    "-i", getLogo(id),
+
+    "-filter_complex",
+    "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2[base];[1:v]scale=-1:3000[logo];[base][logo]overlay=W-w-2:2",
+
+    "-c:v", "libx264",
+"-preset", q.preset,
+"-tune", "zerolatency",
+
+"-pix_fmt", "yuv420p",
+
+"-profile:v", q.profile,
+"-level", q.level,
+
+"-b:v", q.bitrate,
+"-maxrate", q.maxrate,
+"-bufsize", q.bufsize,
+
+"-r", q.fps,
+"-g", "50",
+
+    "-c:a", "aac",
+    "-b:a", "128k",
+
+    "-f", "flv",
+    ch.output
+  ]);
+
+  ffmpegProcesses[id] = ffmpeg;
+
+  ffmpeg.stderr.on("data", (d) => {
+    const text = d.toString();
+    console.log(`[${id}] ${text}`);
+
+    text.split("\n").forEach(line => {
+      const trimmed = line.trim();
+      if (trimmed) pushLog(id, trimmed);
+    });
+
+    // قراءة البت ريت الحقيقي اللي ffmpeg بيبعته فعليًا
+    const match = text.match(/bitrate=\s*([\d.]+)\s*kbits\/s/i);
+    if (match) {
+      lastBitrateKbps[id] = parseFloat(match[1]);
     }
+  });
 
-    // ====================================
-    // 🛑 التحقق مرة أخرى
-    // ====================================
-    if (ffmpegProcesses[id]) {
-      delete startingStreams[id];
-      return;
+  ffmpeg.on("exit", () => {
+    delete ffmpegProcesses[id];
+
+    // نضيف مدة الجلسة دي لإجمالي وقت البث الحقيقي قبل ما نصفرها
+    if (liveSince[id]) {
+      totalOnairMs[id] = (totalOnairMs[id] || 0) + (Date.now() - liveSince[id]);
+      delete liveSince[id];
     }
-
-    // ====================================
-    // 🎚️ QUALITY
-    // ====================================
-    const q = getQualityPreset(ch);
-
-    // ====================================
-    // 📡 PROTOCOL
-    // ====================================
-    const protocol =
-      ch.protocol ||
-      (
-        (ch.output || "")
-          .toLowerCase()
-          .includes("/jaco/")
-          ? "jaco"
-          : "rtmp"
-      );
-
-    const isJaco =
-      protocol === "jaco";
-
-    console.log(
-      `[${id}] 📡 PROTOCOL: ${isJaco ? "JACO" : "RTMP"}`
-    );
-
-    console.log(
-      `[${id}] 🎥 QUALITY: ${q.scale}`
-    );
-
-    console.log(
-      `[${id}] 📊 VIDEO BITRATE: ${q.bitrate}`
-    );
-
-    // ====================================
-    // ▶ START
-    // ====================================
-    console.log(
-      `[${id}] ▶ START STREAM`
-    );
-
-    logEvent(
-      id,
-      "start",
-      isJaco
-        ? "تم تشغيل قناة JACO"
-        : "تم تشغيل القناة"
-    );
-
-    manuallyStopped[id] = false;
-
-    liveSince[id] = Date.now();
-
-    if (totalOnairMs[id] == null) {
-      totalOnairMs[id] = 0;
-    }
-
     lastBitrateKbps[id] = null;
 
-    // ====================================
-    // 🎬 FFMPEG ARGUMENTS
-    // ====================================
-    const ffmpegArgs = [
-
-      // ----------------------------------
-      // INPUT LIVE
-      // ----------------------------------
-      "-re",
-
-      "-reconnect",
-      "1",
-
-      "-reconnect_streamed",
-      "1",
-
-      "-reconnect_delay_max",
-      "5",
-
-      "-i",
-      resolvedInput
-
-    ];
-
-    // ====================================
-    // 🖼️ LOGO
-    // ====================================
-    const logo = getLogo(id);
-
-    if (logo) {
-
-      ffmpegArgs.push(
-
-        "-loop",
-        "1",
-
-        "-i",
-        logo
-
-      );
-
+    // لو اتوقفت يدويًا، منعملش إعادة تشغيل تلقائي
+    if (manuallyStopped[id]) {
+      console.log("⏹ EXIT (manual stop):", id);
+      return;
     }
 
-    // ====================================
-    // 🎨 VIDEO FILTER
-    // ====================================
-    if (logo) {
+    console.log("❌ EXIT (unexpected):", id);
+    logEvent(id, "exit", "توقفت القناة (خروج غير متوقع)");
 
-      ffmpegArgs.push(
-
-        "-filter_complex",
-    `[0:v]scale=${q.scale}:force_original_aspect_ratio=decrease,pad=${q.scale}:(ow-iw)/2:(oh-ih)/2[base];[1:v]scale=-1:3000[logo];[base][logo]overlay=W-w-2:2`,
-
-        "-map",
-        "[vout]"
-
-      );
-
-    } else {
-
-      ffmpegArgs.push(
-
-        "-vf",
-        `scale=${q.scale}:force_original_aspect_ratio=decrease,pad=${q.scale}:(ow-iw)/2:(oh-ih)/2`,
-
-        "-map",
-        "0:v"
-
-      );
-
-    }
-
-    // ====================================
-    // 🔊 AUDIO
-    // ====================================
-    ffmpegArgs.push(
-
-      "-map",
-      "0:a?",
-
-      // ==================================
-      // 🎥 VIDEO ENCODER
-      // ==================================
-      "-c:v",
-      "libx264",
-
-      "-preset",
-      q.preset,
-
-      "-tune",
-      "zerolatency",
-
-      "-pix_fmt",
-      "yuv420p",
-
-      "-profile:v",
-      q.profile,
-
-      "-level",
-      q.level,
-
-      "-b:v",
-      q.bitrate,
-
-      "-maxrate",
-      q.maxrate,
-
-      "-bufsize",
-      q.bufsize,
-
-      "-r",
-      q.fps,
-
-      "-g",
-      "50",
-
-      // ==================================
-      // 🔊 AUDIO ENCODER
-      // ==================================
-      "-c:a",
-      "aac",
-
-      "-b:a",
-      "128k",
-
-      "-ar",
-      "44100"
-    );
-
-    // ====================================
-    // 📡 JACO OUTPUT
-    // ====================================
-    if (isJaco) {
-
-      console.log(
-        `[${id}] 📡 تجهيز إخراج JACO RTMP/FLV`
-      );
-
-      ffmpegArgs.push(
-
-        // المحافظة على البث Live
-        "-rtmp_live",
-        "live",
-
-        // عدم إرسال duration/filesize
-        "-flvflags",
-        "no_duration_filesize",
-
-        // FLV/RTMP
-        "-f",
-        "flv",
-
-        // Output
-        ch.output
-
-      );
-
-    } else {
-
-      // ==================================
-      // 📡 NORMAL RTMP OUTPUT
-      // ==================================
-      ffmpegArgs.push(
-
-        "-f",
-        "flv",
-
-        ch.output
-
-      );
-
-    }
-
-    // ====================================
-    // 🧾 عرض الأمر في اللوج
-    // ====================================
-    console.log(
-      `[${id}] 🚀 FFmpeg COMMAND:`
-    );
-
-    console.log(
-      "ffmpeg " +
-      ffmpegArgs
-        .map(arg => `"${arg}"`)
-        .join(" ")
-    );
-
-    // ====================================
-    // 🎬 SPAWN FFMPEG
-    // ====================================
-    const ffmpeg = spawn(
-      "ffmpeg",
-      ffmpegArgs,
-      {
-        stdio: [
-          "ignore",
-          "pipe",
-          "pipe"
-        ]
+    setTimeout(() => {
+      if (!ffmpegProcesses[id] && !manuallyStopped[id]) {
+        logEvent(id, "restart", "إعادة تشغيل تلقائية بعد التوقف");
+        spawnStream(id);
       }
-    );
-
-    // ====================================
-    // 💾 حفظ العملية
-    // ====================================
-    ffmpegProcesses[id] = ffmpeg;
-
-    delete startingStreams[id];
-
-    // ====================================
-    // 📋 STDOUT
-    // ====================================
-    ffmpeg.stdout.on("data", (d) => {
-
-      const text =
-        d.toString();
-
-      console.log(
-        `[${id}] STDOUT: ${text}`
-      );
-
-      text
-        .split("\n")
-        .forEach(line => {
-
-          const trimmed =
-            line.trim();
-
-          if (trimmed) {
-
-            pushLog(
-              id,
-              trimmed
-            );
-
-          }
-
-        });
-
-    });
-
-    // ====================================
-    // 📋 STDERR
-    // ====================================
-    ffmpeg.stderr.on("data", (d) => {
-
-      const text =
-        d.toString();
-
-      console.log(
-        `[${id}] ${text}`
-      );
-
-      text
-        .split("\n")
-        .forEach(line => {
-
-          const trimmed =
-            line.trim();
-
-          if (trimmed) {
-
-            pushLog(
-              id,
-              trimmed
-            );
-
-          }
-
-        });
-
-      // ==================================
-      // 📊 BITRATE الحقيقي
-      // ==================================
-      const match =
-        text.match(
-          /bitrate=\s*([\d.]+)\s*kbits\/s/i
-        );
-
-      if (match) {
-
-        lastBitrateKbps[id] =
-          parseFloat(match[1]);
-
-      }
-
-    });
-
-    // ====================================
-    // ❌ PROCESS ERROR
-    // ====================================
-    ffmpeg.on("error", (err) => {
-
-      console.log(
-        `[${id}] 🔥 FFmpeg ERROR:`,
-        err.message
-      );
-
-      pushLog(
-        id,
-        "FFmpeg ERROR: " +
-        err.message
-      );
-
-    });
-
-    // ====================================
-    // 🛑 PROCESS EXIT
-    // ====================================
-    ffmpeg.on(
-      "exit",
-      (code, signal) => {
-
-        // نتأكد أن العملية الخارجة
-        // هي العملية الحالية
-        if (
-          ffmpegProcesses[id] === ffmpeg
-        ) {
-
-          delete ffmpegProcesses[id];
-
-        }
-
-        delete startingStreams[id];
-
-        // ==================================
-        // ⏱️ حساب مدة الجلسة
-        // ==================================
-        if (liveSince[id]) {
-
-          totalOnairMs[id] =
-            (totalOnairMs[id] || 0) +
-            (
-              Date.now() -
-              liveSince[id]
-            );
-
-          delete liveSince[id];
-
-        }
-
-        lastBitrateKbps[id] =
-          null;
-
-        // ==================================
-        // ⏹️ MANUAL STOP
-        // ==================================
-        if (manuallyStopped[id]) {
-
-          console.log(
-            `[${id}] ⏹ EXIT (manual stop)`
-          );
-
-          return;
-
-        }
-
-        // ==================================
-        // ❌ UNEXPECTED EXIT
-        // ==================================
-        console.log(
-          `[${id}] ❌ EXIT (unexpected)`,
-          "code:",
-          code,
-          "signal:",
-          signal
-        );
-
-        logEvent(
-          id,
-          "exit",
-          `توقفت القناة بشكل غير متوقع (code=${code}, signal=${signal || "none"})`
-        );
-
-        // ==================================
-        // 🔄 AUTO RESTART
-        // ==================================
-        setTimeout(() => {
-
-          if (
-            !ffmpegProcesses[id] &&
-            !startingStreams[id] &&
-            !manuallyStopped[id] &&
-            channels[id]
-          ) {
-
-            logEvent(
-              id,
-              "restart",
-              "إعادة تشغيل تلقائية بعد التوقف"
-            );
-
-            spawnStream(id);
-
-          }
-
-        }, 8000);
-
-      }
-    );
-
-  } catch (err) {
-
-    delete startingStreams[id];
-
-    console.log(
-      `[${id}] 🔥 خطأ أثناء تشغيل القناة:`,
-      err.message
-    );
-
-    logEvent(
-      id,
-      "exit",
-      "خطأ أثناء تشغيل القناة: " +
-      err.message
-    );
-
-  }
-
+    }, 8000);
+  });
 }
 
 // ======================
@@ -952,89 +424,45 @@ app.get("/", (req, res) => {
 });
 
 app.get("/start", (req, res) => {
-
   const id = req.query.id;
-
-  if (!channels[id]) {
-    return res.send(
-      "❌ invalid channel"
-    );
-  }
+  if (!channels[id]) return res.send("❌ invalid channel");
 
   spawnStream(id);
-
-  res.send(
-    "started " + id
-  );
+  res.send("started " + id);
 });
 
 app.get("/stop", (req, res) => {
-
   const id = req.query.id;
 
   manuallyStopped[id] = true;
 
-  // إلغاء أي عملية بدء جارية
-  delete startingStreams[id];
-
   if (ffmpegProcesses[id]) {
-
-    ffmpegProcesses[id].kill(
-      "SIGKILL"
-    );
-
+    ffmpegProcesses[id].kill("SIGKILL");
     delete ffmpegProcesses[id];
-
-    logEvent(
-      id,
-      "stop",
-      "تم إيقاف القناة يدويًا"
-    );
+    logEvent(id, "stop", "تم إيقاف القناة يدويًا");
   }
 
-  res.send(
-    "stopped " + id
-  );
+  res.send("stopped " + id);
 });
 
 app.get("/start-all", (req, res) => {
-
   for (const id in channels) {
     spawnStream(id);
   }
-
-  res.json({
-    ok: true
-  });
+  res.json({ ok: true });
 });
 
 app.get("/stop-all", (req, res) => {
-
   for (const id in channels) {
-
     manuallyStopped[id] = true;
 
-    delete startingStreams[id];
-
     if (ffmpegProcesses[id]) {
-
-      ffmpegProcesses[id].kill(
-        "SIGKILL"
-      );
-
+      ffmpegProcesses[id].kill("SIGKILL");
       delete ffmpegProcesses[id];
-
-      logEvent(
-        id,
-        "stop",
-        "تم إيقاف القناة يدويًا (إيقاف الكل)"
-      );
+      logEvent(id, "stop", "تم إيقاف القناة يدويًا (إيقاف الكل)");
     }
   }
-
-  res.json({
-    ok: true
-  });
+  res.json({ ok: true });
 });
 
 app.get("/events", (req, res) => {
@@ -1042,348 +470,137 @@ app.get("/events", (req, res) => {
 });
 
 app.get("/logs/:id", (req, res) => {
-
   const id = req.params.id;
-
-  res.json(
-    ffmpegLogs[id] || []
-  );
+  res.json(ffmpegLogs[id] || []);
 });
 
 // ======================
-// 👁️ WATCH
+// 👁️ رابط المشاهدة الحقيقي (بروكسي + عداد حقيقي)
+// كل طلب بيعدي من هنا بيتسجل كمشاهد حقيقي
 // ======================
 async function handleWatchRequest(req, res) {
-
   const id = req.params.id;
-
   const ch = channels[id];
 
   if (!ch || !ch.watchUrl) {
-
-    return res
-      .status(404)
-      .send(
-        "لا يوجد رابط مشاهدة لهذه القناة"
-      );
+    return res.status(404).send("لا يوجد رابط مشاهدة لهذه القناة");
   }
 
-  const ip =
-    req.ip ||
-    req.connection.remoteAddress ||
-    "unknown";
+  // تسجيل المشاهد (IP الطالب) كمشاهد حقيقي حالي وإجمالي
+  const ip = req.ip || req.connection.remoteAddress || "unknown";
 
-  if (!currentViewerLog[id]) {
-    currentViewerLog[id] =
-      new Map();
-  }
+  if (!currentViewerLog[id]) currentViewerLog[id] = new Map();
+  currentViewerLog[id].set(ip, Date.now());
 
-  currentViewerLog[id].set(
-    ip,
-    Date.now()
-  );
-
-  if (!totalViewerSet[id]) {
-    totalViewerSet[id] =
-      new Set();
-  }
-
+  if (!totalViewerSet[id]) totalViewerSet[id] = new Set();
   totalViewerSet[id].add(ip);
 
   try {
-
-    const upstream =
-      await fetch(ch.watchUrl);
+    const upstream = await fetch(ch.watchUrl);
 
     if (!upstream.ok) {
-
-      return res
-        .status(502)
-        .send(
-          "تعذر الوصول لرابط المشاهدة الأصلي"
-        );
+      return res.status(502).send("تعذر الوصول لرابط المشاهدة الأصلي");
     }
 
-    const text =
-      await upstream.text();
+    const text = await upstream.text();
 
-    const rewritten =
-      text
-        .split("\n")
-        .map(line => {
+    // إعادة كتابة أي أسطر نسبية (segments) عشان تفضل شغالة برضو بعد المرور من عندنا
+    const rewritten = text.split("\n").map(line => {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) return line;
+      try {
+        return new URL(trimmed, ch.watchUrl).href;
+      } catch (e) {
+        return line;
+      }
+    }).join("\n");
 
-          const trimmed =
-            line.trim();
-
-          if (
-            !trimmed ||
-            trimmed.startsWith("#")
-          ) {
-            return line;
-          }
-
-          try {
-
-            return new URL(
-              trimmed,
-              ch.watchUrl
-            ).href;
-
-          } catch (e) {
-
-            return line;
-          }
-        })
-        .join("\n");
-
-    res.set(
-      "Content-Type",
-      "application/vnd.apple.mpegurl"
-    );
-
+    res.set("Content-Type", "application/vnd.apple.mpegurl");
     res.send(rewritten);
 
   } catch (err) {
-
-    console.log(
-      "🔥 /watch proxy error:",
-      err.message
-    );
-
-    res
-      .status(502)
-      .send(
-        "تعذر جلب رابط المشاهدة"
-      );
+    console.log("🔥 /watch proxy error:", err.message);
+    res.status(502).send("تعذر جلب رابط المشاهدة");
   }
 }
 
-// ======================
-// 📺 WATCH ROUTES
-// ======================
-app.get(
-  "/watch/:id.m3u8",
-  handleWatchRequest
-);
+// نفس المسار بصيغتين: بدون امتداد، وبامتداد .m3u8 (بعض مشغلات IPTV محتاجة الامتداد صراحة)
+// لازم مسار .m3u8 يتسجل الأول، عشان مسار :id العادي بيقبل أي حروف (حتى النقطة) ويلقطه الأول لو اتسجل قبله
+app.get("/watch/:id.m3u8", handleWatchRequest);
+app.get("/watch/:id", handleWatchRequest);
 
-app.get(
-  "/watch/:id",
-  handleWatchRequest
-);
-
-// ======================
-// 📊 STATUS
-// ======================
 app.get("/status", (req, res) => {
-
   const result = {};
 
   for (const id in channels) {
-
-    const active =
-      !!ffmpegProcesses[id];
-
-    const currentSessionMs =
-      active && liveSince[id]
-        ? Date.now() - liveSince[id]
-        : 0;
+    const active = !!ffmpegProcesses[id];
+    const currentSessionMs = active && liveSince[id] ? (Date.now() - liveSince[id]) : 0;
 
     result[id] = {
-
       active,
-
-      starting:
-        !!startingStreams[id],
-
-      uptimeSeconds:
-        Math.floor(
-          currentSessionMs / 1000
-        ),
-
-      totalSeconds:
-        Math.floor(
-          (
-            (totalOnairMs[id] || 0) +
-            currentSessionMs
-          ) / 1000
-        ),
-
-      bitrateKbps:
-        active
-          ? (
-              lastBitrateKbps[id] ||
-              null
-            )
-          : null,
-
-      currentViewers:
-        currentViewerLog[id]
-          ? currentViewerLog[id].size
-          : 0,
-
-      totalViewers:
-        totalViewerSet[id]
-          ? totalViewerSet[id].size
-          : 0
+      uptimeSeconds: Math.floor(currentSessionMs / 1000),
+      totalSeconds: Math.floor(((totalOnairMs[id] || 0) + currentSessionMs) / 1000),
+      bitrateKbps: active ? (lastBitrateKbps[id] || null) : null,
+      currentViewers: currentViewerLog[id] ? currentViewerLog[id].size : 0,
+      totalViewers: totalViewerSet[id] ? totalViewerSet[id].size : 0
     };
   }
 
   res.json(result);
 });
 
-// ======================
-// 📡 CHANNELS
-// ======================
 app.get("/channels", (req, res) => {
   res.json(channels);
 });
 
-// ======================
-// ➕ ADD CHANNEL
-// ======================
 app.post("/channel", (req, res) => {
+  const { id, input, output, logo, category, watchUrl, quality } = req.body;
 
-  const {
-    id,
-    input,
-    output,
-    logo,
-    category,
-    watchUrl,
-    quality,
-    protocol
-  } = req.body;
-
-  if (!id || !input || !output) {
-
-    return res
-      .status(400)
-      .json({
-        ok: false
-      });
-  }
+  if (!id || !input || !output)
+    return res.status(400).json({ ok: false });
 
   channels[id] = {
-
     input,
-
     output,
-
-    logo:
-      logo || "",
-
-    category:
-      category || "",
-
-    watchUrl:
-      watchUrl || "",
-
-    quality:
-      QUALITY_PRESETS[quality]
-        ? quality
-        : "high",
-
-    protocol:
-      protocol || ""
+    logo: logo || "",
+    category: category || "",
+    watchUrl: watchUrl || "",
+    quality: QUALITY_PRESETS[quality] ? quality : "high"
   };
 
-  res.json({
-    ok: true
-  });
+  res.json({ ok: true });
 });
 
-// ======================
-// ✏️ UPDATE CHANNEL
-// ======================
 app.put("/channel/:id", (req, res) => {
+  const id = req.params.id;
 
-  const id =
-    req.params.id;
-
-  if (!channels[id]) {
-
-    return res
-      .status(404)
-      .json({
-        ok: false
-      });
-  }
+  if (!channels[id])
+    return res.status(404).json({ ok: false });
 
   channels[id] = {
-
     ...channels[id],
-
-    input:
-      req.body.input ??
-      channels[id].input,
-
-    output:
-      req.body.output ??
-      channels[id].output,
-
-    logo:
-      req.body.logo ??
-      channels[id].logo,
-
-    category:
-      req.body.category ??
-      channels[id].category,
-
-    watchUrl:
-      req.body.watchUrl ??
-      channels[id].watchUrl,
-
-    quality:
-      QUALITY_PRESETS[
-        req.body.quality
-      ]
-        ? req.body.quality
-        : (
-            channels[id].quality ||
-            "high"
-          ),
-
-    protocol:
-      req.body.protocol ??
-      channels[id].protocol ??
-      ""
+    input: req.body.input ?? channels[id].input,
+    output: req.body.output ?? channels[id].output,
+    logo: req.body.logo ?? channels[id].logo,
+    category: req.body.category ?? channels[id].category,
+    watchUrl: req.body.watchUrl ?? channels[id].watchUrl,
+    quality: QUALITY_PRESETS[req.body.quality] ? req.body.quality : (channels[id].quality || "high")
   };
 
-  res.json({
-    ok: true
-  });
+  res.json({ ok: true });
 });
 
-// ======================
-// 🗑️ DELETE CHANNEL
-// ======================
 app.delete("/channel/:id", (req, res) => {
-
-  const id =
-    req.params.id;
-
-  manuallyStopped[id] = true;
-
-  delete startingStreams[id];
+  const id = req.params.id;
 
   if (ffmpegProcesses[id]) {
-
-    ffmpegProcesses[id].kill(
-      "SIGKILL"
-    );
-
+    ffmpegProcesses[id].kill("SIGKILL");
     delete ffmpegProcesses[id];
   }
 
   delete channels[id];
 
-  delete liveSince[id];
-
-  delete lastBitrateKbps[id];
-
-  res.json({
-    ok: true
-  });
+  res.json({ ok: true });
 });
 
 // ===============================
@@ -1452,34 +669,21 @@ html[data-accent="amber"]{
 --success-bg:#FAEEDA;
 }
 
-*{
-box-sizing:border-box;
-}
+*{ box-sizing:border-box; }
 
-html,
-body{
-margin:0;
-padding:0;
-overflow-x:hidden;
-}
+html, body{ margin:0; padding:0; overflow-x:hidden; }
 
 body{
-font-family:'IBM Plex Sans Arabic',Arial,sans-serif;
+font-family:'IBM Plex Sans Arabic', Arial, sans-serif;
 background:var(--page);
 color:var(--text);
 min-height:100vh;
 min-height:100dvh;
 }
 
-.mono{
-font-family:'IBM Plex Mono',monospace;
-}
+.mono{ font-family:'IBM Plex Mono', monospace; }
 
-.app{
-display:flex;
-min-height:100vh;
-min-height:100dvh;
-}
+.app{ display:flex; min-height:100vh; min-height:100dvh; }
 
 /* ---------- sidebar ---------- */
 
@@ -1517,18 +721,8 @@ font-size:17px;
 flex-shrink:0;
 }
 
-.brand .word{
-font-weight:600;
-font-size:15px;
-}
-
-.brand .word small{
-display:block;
-font-size:11px;
-color:var(--text-3);
-font-weight:400;
-margin-top:1px;
-}
+.brand .word{ font-weight:600; font-size:15px; }
+.brand .word small{ display:block; font-size:11px; color:var(--text-3); font-weight:400; margin-top:1px; }
 
 .navLabel{
 font-size:11px;
@@ -1549,7 +743,7 @@ border:none;
 border-radius:var(--radius);
 background:transparent;
 color:var(--text-2);
-font-family:'IBM Plex Sans Arabic',Arial,sans-serif;
+font-family:'IBM Plex Sans Arabic', Arial, sans-serif;
 font-weight:500;
 font-size:14px;
 cursor:pointer;
@@ -1557,54 +751,22 @@ text-align:right;
 transition:0.12s;
 }
 
-.side button i{
-font-size:17px;
-color:var(--text-3);
-}
+.side button i{ font-size:17px; color:var(--text-3); }
 
-.side button:hover{
-background:var(--surface-2);
-}
+.side button:hover{ background:var(--surface-2); }
+.side button.navActive{ background:var(--accent-bg); color:var(--accent); }
+.side button.navActive i{ color:var(--accent); }
 
-.side button.navActive{
-background:var(--accent-bg);
-color:var(--accent);
-}
+.side .foot{ margin-top:auto; padding-top:14px; border-top:1px solid var(--border); }
 
-.side button.navActive i{
-color:var(--accent);
-}
-
-.side .foot{
-margin-top:auto;
-padding-top:14px;
-border-top:1px solid var(--border);
-}
-
-.side .goBtn{
-color:var(--success);
-}
-
-.side .goBtn i{
-color:var(--success);
-}
-
-.side .stopBtn{
-color:var(--danger);
-}
-
-.side .stopBtn i{
-color:var(--danger);
-}
+.side .goBtn{ color:var(--success); }
+.side .goBtn i{ color:var(--success); }
+.side .stopBtn{ color:var(--danger); }
+.side .stopBtn i{ color:var(--danger); }
 
 /* ---------- workspace ---------- */
 
-.workspace{
-flex:1;
-display:flex;
-flex-direction:column;
-min-width:0;
-}
+.workspace{ flex:1; display:flex; flex-direction:column; min-width:0; }
 
 .topbar{
 height:60px;
@@ -1617,11 +779,7 @@ justify-content:space-between;
 padding:0 24px;
 }
 
-.topbar h1{
-font-size:16px;
-font-weight:600;
-margin:0;
-}
+.topbar h1{ font-size:16px; font-weight:600; margin:0; }
 
 .pill{
 display:inline-flex;
@@ -1633,19 +791,10 @@ font-size:12px;
 font-weight:500;
 }
 
-.pill i{
-font-size:14px;
-}
+.pill i{ font-size:14px; }
 
-.conn-ok{
-background:var(--success-bg);
-color:var(--success);
-}
-
-.conn-bad{
-background:var(--danger-bg);
-color:var(--danger);
-}
+.conn-ok{ background:var(--success-bg); color:var(--success); }
+.conn-bad{ background:var(--danger-bg); color:var(--danger); }
 
 .iconBtn{
 width:36px;
@@ -1662,10 +811,7 @@ font-size:16px;
 padding:0;
 }
 
-.iconBtn:hover{
-border-color:var(--border-strong);
-background:var(--surface-2);
-}
+.iconBtn:hover{ border-color:var(--border-strong); background:var(--surface-2); }
 
 .themeMenu{
 position:absolute;
@@ -1683,9 +829,7 @@ box-shadow:0 8px 24px rgba(16,24,40,0.12);
 min-width:160px;
 }
 
-.themeMenu.show{
-display:flex;
-}
+.themeMenu.show{ display:flex; }
 
 .themeMenu button{
 display:flex;
@@ -1703,28 +847,12 @@ text-align:right;
 width:100%;
 }
 
-.themeMenu button:hover{
-background:var(--surface-2);
-}
+.themeMenu button:hover{ background:var(--surface-2); }
+.themeMenu button.themeActive{ color:var(--text); border-color:var(--border); background:var(--surface-2); }
 
-.themeMenu button.themeActive{
-color:var(--text);
-border-color:var(--border);
-background:var(--surface-2);
-}
+.swatch{ width:12px; height:12px; border-radius:50%; flex-shrink:0; }
 
-.swatch{
-width:12px;
-height:12px;
-border-radius:50%;
-flex-shrink:0;
-}
-
-.content{
-flex:1;
-padding:24px;
-overflow:auto;
-}
+.content{ flex:1; padding:24px; overflow:auto; }
 
 /* ---------- stat cards ---------- */
 
@@ -1742,53 +870,21 @@ border-radius:var(--radius-lg);
 padding:16px 18px;
 }
 
-.statCard .lbl{
-font-size:12.5px;
-color:var(--text-2);
-margin-bottom:6px;
-display:flex;
-align-items:center;
-gap:6px;
-}
+.statCard .lbl{ font-size:12.5px; color:var(--text-2); margin-bottom:6px; display:flex; align-items:center; gap:6px; }
+.statCard .lbl i{ font-size:15px; }
+.statCard .num{ font-size:26px; font-weight:600; font-family:'IBM Plex Mono', monospace; }
 
-.statCard .lbl i{
-font-size:15px;
-}
-
-.statCard .num{
-font-size:26px;
-font-weight:600;
-font-family:'IBM Plex Mono',monospace;
-}
-
-.statCard.ok .num{
-color:var(--success);
-}
-
-.statCard.off .num{
-color:var(--text-2);
-}
-
-.statCard.accent .num{
-color:var(--accent);
-}
-
-.statCard.warn .num{
-color:var(--warning);
-}
+.statCard.ok .num{ color:var(--success); }
+.statCard.off .num{ color:var(--text-2); }
+.statCard.accent .num{ color:var(--accent); }
+.statCard.warn .num{ color:var(--warning); }
 
 /* ---------- toolbar ---------- */
 
-.toolbar{
-display:flex;
-gap:10px;
-margin-bottom:18px;
-flex-wrap:wrap;
-}
+.toolbar{ display:flex; gap:10px; margin-bottom:18px; flex-wrap:wrap; }
 
-.toolbar input,
-.toolbar select{
-font-family:'IBM Plex Sans Arabic',Arial,sans-serif;
+.toolbar input, .toolbar select{
+font-family:'IBM Plex Sans Arabic', Arial, sans-serif;
 padding:10px 14px;
 border-radius:var(--radius);
 border:1px solid var(--border);
@@ -1798,19 +894,9 @@ outline:none;
 font-size:13.5px;
 }
 
-.toolbar input{
-flex:1 1 240px;
-}
-
-.toolbar select{
-flex:0 1 190px;
-cursor:pointer;
-}
-
-.toolbar input:focus,
-.toolbar select:focus{
-border-color:var(--accent);
-}
+.toolbar input{ flex:1 1 240px; }
+.toolbar select{ flex:0 1 190px; cursor:pointer; }
+.toolbar input:focus, .toolbar select:focus{ border-color:var(--accent); }
 
 /* ---------- channel cards ---------- */
 
@@ -1841,17 +927,9 @@ height:3px;
 background:var(--accent);
 }
 
-.card:hover{
-border-color:var(--border-strong);
-box-shadow:0 1px 3px rgba(16,24,40,0.06);
-}
+.card:hover{ border-color:var(--border-strong); box-shadow:0 1px 3px rgba(16,24,40,0.06); }
 
-.cardHead{
-display:flex;
-align-items:center;
-gap:10px;
-margin-bottom:12px;
-}
+.cardHead{ display:flex; align-items:center; gap:10px; margin-bottom:12px; }
 
 .logoBox{
 width:38px;
@@ -1868,20 +946,13 @@ color:var(--text-3);
 font-size:16px;
 }
 
-.logoBox img{
-width:100%;
-height:100%;
-object-fit:cover;
-}
+.logoBox img{ width:100%; height:100%; object-fit:cover; }
 
-.cardHead .titleWrap{
-flex:1;
-min-width:0;
-}
+.cardHead .titleWrap{ flex:1; min-width:0; }
 
 .cardHead h3{
 margin:0;
-font-family:'IBM Plex Mono',monospace;
+font-family:'IBM Plex Mono', monospace;
 font-size:15px;
 font-weight:600;
 direction:ltr;
@@ -1898,22 +969,6 @@ color:var(--text-3);
 margin-top:2px;
 }
 
-.protocolTag{
-display:inline-block;
-font-size:10.5px;
-font-family:'IBM Plex Mono',monospace;
-font-weight:600;
-margin-right:6px;
-}
-
-.protocolTag.jaco{
-color:var(--accent);
-}
-
-.protocolTag.rtmp{
-color:var(--text-3);
-}
-
 .statusPill{
 font-size:11px;
 font-weight:600;
@@ -1925,25 +980,11 @@ gap:4px;
 flex-shrink:0;
 }
 
-.statusPill.on{
-background:var(--success-bg);
-color:var(--success);
-}
+.statusPill.on{ background:var(--success-bg); color:var(--success); }
+.statusPill.off{ background:var(--surface-2); color:var(--text-3); }
+.statusPill i{ font-size:8px; }
 
-.statusPill.off{
-background:var(--surface-2);
-color:var(--text-3);
-}
-
-.statusPill i{
-font-size:8px;
-}
-
-.readoutRow{
-display:flex;
-gap:10px;
-margin-bottom:12px;
-}
+.readoutRow{ display:flex; gap:10px; margin-bottom:12px; }
 
 .readoutBox{
 flex:1;
@@ -1952,34 +993,14 @@ border-radius:8px;
 padding:8px 10px;
 }
 
-.readoutBox .rLbl{
-font-size:10px;
-color:var(--text-3);
-margin-bottom:2px;
-}
+.readoutBox .rLbl{ font-size:10px; color:var(--text-3); margin-bottom:2px; }
+.readoutBox .rVal{ font-family:'IBM Plex Mono', monospace; font-size:15px; font-weight:600; }
+.readoutBox:first-child .rVal{ color:var(--accent); }
 
-.readoutBox .rVal{
-font-family:'IBM Plex Mono',monospace;
-font-size:15px;
-font-weight:600;
-}
-
-.readoutBox:first-child .rVal{
-color:var(--accent);
-}
-
-.techLine{
-margin-bottom:7px;
-}
-
-.techLine .tLbl{
-font-size:10px;
-color:var(--text-3);
-margin-bottom:2px;
-}
-
+.techLine{ margin-bottom:7px; }
+.techLine .tLbl{ font-size:10px; color:var(--text-3); margin-bottom:2px; }
 .techLine .tVal{
-font-family:'IBM Plex Mono',monospace;
+font-family:'IBM Plex Mono', monospace;
 font-size:11px;
 color:var(--text-2);
 direction:ltr;
@@ -1990,25 +1011,11 @@ text-overflow:ellipsis;
 white-space:nowrap;
 }
 
-.btnRow{
-display:flex;
-gap:6px;
-margin-top:12px;
-flex-wrap:wrap;
-}
+.btnRow{ display:flex; gap:6px; margin-top:12px; flex-wrap:wrap; }
 
-.editField{
-margin-bottom:9px;
-}
-
-.editField .tLbl{
-font-size:10px;
-color:var(--text-3);
-margin-bottom:3px;
-}
-
-.editField input,
-.editField select{
+.editField{ margin-bottom:9px; }
+.editField .tLbl{ font-size:10px; color:var(--text-3); margin-bottom:3px; }
+.editField input{
 width:100%;
 padding:7px 9px;
 border-radius:7px;
@@ -2016,28 +1023,14 @@ border:1px solid var(--border);
 background:var(--surface-2);
 color:var(--text);
 outline:none;
-font-family:'IBM Plex Mono',monospace;
+font-family:'IBM Plex Mono', monospace;
 font-size:11.5px;
 direction:ltr;
 text-align:left;
 }
+.editField input:focus{ border-color:var(--accent); }
 
-.editField input:focus,
-.editField select:focus{
-border-color:var(--accent);
-}
-
-.editField input[readonly]{
-opacity:.75;
-cursor:not-allowed;
-}
-
-.editActions{
-display:flex;
-gap:6px;
-margin-top:12px;
-}
-
+.editActions{ display:flex; gap:6px; margin-top:12px; }
 .editActions button{
 flex:1;
 padding:9px;
@@ -2047,17 +1040,8 @@ cursor:pointer;
 font-weight:600;
 font-size:12.5px;
 }
-
-.editActions .saveBtn{
-background:var(--accent);
-color:#fff;
-border-color:var(--accent);
-}
-
-.editActions .cancelBtn{
-background:var(--surface-2);
-color:var(--text-2);
-}
+.editActions .saveBtn{ background:var(--accent); color:#fff; border-color:var(--accent); }
+.editActions .cancelBtn{ background:var(--surface-2); color:var(--text-2); }
 
 .iBtn{
 width:32px;
@@ -2074,18 +1058,9 @@ font-size:15px;
 transition:0.12s;
 }
 
-.iBtn:hover{
-border-color:var(--border-strong);
-background:var(--surface-2);
-}
-
-.iBtn.go{
-color:var(--success);
-}
-
-.iBtn.stop{
-color:var(--danger);
-}
+.iBtn:hover{ border-color:var(--border-strong); background:var(--surface-2); }
+.iBtn.go{ color:var(--success); }
+.iBtn.stop{ color:var(--danger); }
 
 /* ---------- add channel form ---------- */
 
@@ -2106,12 +1081,9 @@ margin-top:14px;
 font-weight:500;
 }
 
-.formCard label:first-of-type{
-margin-top:0;
-}
+.formCard label:first-of-type{ margin-top:0; }
 
-.formCard input,
-.formCard select{
+.formCard input, .formCard select{
 width:100%;
 padding:10px 13px;
 border-radius:var(--radius);
@@ -2119,22 +1091,15 @@ border:1px solid var(--border);
 background:var(--surface);
 color:var(--text);
 outline:none;
-font-family:'IBM Plex Mono',monospace;
+font-family:'IBM Plex Mono', monospace;
 font-size:13px;
 direction:ltr;
 text-align:left;
 }
 
-.formCard input:focus,
-.formCard select:focus{
-border-color:var(--accent);
-}
+.formCard input:focus{ border-color:var(--accent); }
 
-.formCard .hint{
-font-size:11px;
-color:var(--text-3);
-margin-top:4px;
-}
+.formCard .hint{ font-size:11px; color:var(--text-3); margin-top:4px; }
 
 .formCard .submit{
 margin-top:20px;
@@ -2166,9 +1131,7 @@ padding:12px 16px;
 border-bottom:1px solid var(--border);
 }
 
-.evRow:last-child{
-border-bottom:none;
-}
+.evRow:last-child{ border-bottom:none; }
 
 .evIcon{
 width:30px;
@@ -2181,47 +1144,15 @@ flex-shrink:0;
 font-size:14px;
 }
 
-.evIcon.on{
-background:var(--success-bg);
-color:var(--success);
-}
+.evIcon.on{ background:var(--success-bg); color:var(--success); }
+.evIcon.off{ background:var(--danger-bg); color:var(--danger); }
+.evIcon.warn{ background:var(--warning-bg); color:var(--warning); }
 
-.evIcon.off{
-background:var(--danger-bg);
-color:var(--danger);
-}
-
-.evIcon.warn{
-background:var(--warning-bg);
-color:var(--warning);
-}
-
-.evBody{
-flex:1;
-min-width:0;
-}
-
-.evTitle{
-font-size:13.5px;
-font-weight:500;
-}
-
-.evTitle .mono{
-font-weight:600;
-}
-
-.evMsg{
-font-size:12px;
-color:var(--text-2);
-margin-top:1px;
-}
-
-.evTime{
-font-size:11px;
-color:var(--text-3);
-white-space:nowrap;
-font-family:'IBM Plex Mono',monospace;
-}
+.evBody{ flex:1; min-width:0; }
+.evTitle{ font-size:13.5px; font-weight:500; }
+.evTitle .mono{ font-weight:600; }
+.evMsg{ font-size:12px; color:var(--text-2); margin-top:1px; }
+.evTime{ font-size:11px; color:var(--text-3); white-space:nowrap; font-family:'IBM Plex Mono', monospace; }
 
 /* ---------- log modal ---------- */
 
@@ -2236,9 +1167,7 @@ justify-content:center;
 padding:20px;
 }
 
-.logOverlay.show{
-display:flex;
-}
+.logOverlay.show{ display:flex; }
 
 .logModal{
 background:var(--surface);
@@ -2260,11 +1189,7 @@ padding:14px 18px;
 border-bottom:1px solid var(--border);
 }
 
-.logHeader h3{
-margin:0;
-font-size:14px;
-font-weight:600;
-}
+.logHeader h3{ margin:0; font-size:14px; font-weight:600; }
 
 .logHeader button{
 padding:7px 12px;
@@ -2281,7 +1206,7 @@ font-weight:500;
 padding:14px 18px;
 overflow-y:auto;
 background:#0D1117;
-font-family:'IBM Plex Mono',monospace;
+font-family:'IBM Plex Mono', monospace;
 font-size:11.5px;
 color:#8FE3C0;
 white-space:pre-wrap;
@@ -2291,15 +1216,8 @@ text-align:left;
 line-height:1.6;
 }
 
-.logBody .logLine{
-padding:2px 0;
-border-bottom:1px solid #1c2531;
-}
-
-.logBody .logTime{
-color:#5B9EF2;
-margin-left:8px;
-}
+.logBody .logLine{ padding:2px 0; border-bottom:1px solid #1c2531; }
+.logBody .logTime{ color:#5B9EF2; margin-left:8px; }
 
 /* ---------- mobile ---------- */
 
@@ -2321,27 +1239,14 @@ align-items:center;
 justify-content:center;
 }
 
-.overlay{
-display:none;
-position:fixed;
-inset:0;
-background:rgba(16,24,40,0.4);
-z-index:999;
-}
+.overlay{ display:none; position:fixed; inset:0; background:rgba(16,24,40,0.4); z-index:999; }
+.overlay.show{ display:block; }
 
-.overlay.show{
-display:block;
-}
+@media (max-width: 860px){
 
-@media (max-width:860px){
+.app{ display:block; }
 
-.app{
-display:block;
-}
-
-.menuBtn{
-display:flex;
-}
+.menuBtn{ display:flex; }
 
 .side{
 position:fixed;
@@ -2354,25 +1259,15 @@ transform:translateX(100%);
 box-shadow:-10px 0 30px rgba(16,24,40,0.25);
 }
 
-.side.open{
-transform:translateX(0);
-}
+.side.open{ transform:translateX(0); }
 
-.topbar{
-padding:0 16px 0 60px;
-}
+.topbar{ padding:0 16px 0 60px; }
 
-.content{
-padding:16px;
-}
+.content{ padding:16px; }
 
-.statGrid{
-grid-template-columns:repeat(2,1fr);
-}
+.statGrid{ grid-template-columns:repeat(2,1fr); }
 
-.grid{
-grid-template-columns:1fr;
-}
+.grid{ grid-template-columns:1fr; }
 
 }
 
@@ -2381,10 +1276,7 @@ grid-template-columns:1fr;
 
 <body>
 
-<button class="menuBtn" onclick="toggleMenu()">
-<i class="ti ti-menu-2"></i>
-</button>
-
+<button class="menuBtn" onclick="toggleMenu()"><i class="ti ti-menu-2"></i></button>
 <div class="overlay" id="overlay" onclick="closeMenu()"></div>
 
 <div class="app">
@@ -2392,45 +1284,19 @@ grid-template-columns:1fr;
 <div class="side" id="sideMenu">
 
 <div class="brand">
-<div class="mark">
-<i class="ti ti-broadcast"></i>
-</div>
-
-<div class="word">
-لوحة القنوات
-<small>IPTV CONTROL</small>
-</div>
+<div class="mark"><i class="ti ti-broadcast"></i></div>
+<div class="word">لوحة القنوات<small>IPTV CONTROL</small></div>
 </div>
 
 <div class="navLabel">التنقل</div>
 
-<button class="navActive" id="navChannels" onclick="show('channels');closeMenu()">
-<i class="ti ti-device-tv"></i>
-القنوات
-</button>
-
-<button id="navAdd" onclick="show('add');closeMenu()">
-<i class="ti ti-plus"></i>
-إضافة قناة
-</button>
-
-<button id="navEvents" onclick="show('events');closeMenu()">
-<i class="ti ti-list-details"></i>
-سجل الأحداث
-</button>
+<button class="navActive" id="navChannels" onclick="show('channels');closeMenu()"><i class="ti ti-device-tv"></i>القنوات</button>
+<button id="navAdd" onclick="show('add');closeMenu()"><i class="ti ti-plus"></i>إضافة قناة</button>
+<button id="navEvents" onclick="show('events');closeMenu()"><i class="ti ti-list-details"></i>سجل الأحداث</button>
 
 <div class="foot">
-
-<button class="goBtn" onclick="startAll()">
-<i class="ti ti-player-play"></i>
-تشغيل الكل
-</button>
-
-<button class="stopBtn" onclick="stopAll()">
-<i class="ti ti-player-stop"></i>
-إيقاف الكل
-</button>
-
+<button class="goBtn" onclick="startAll()"><i class="ti ti-player-play"></i>تشغيل الكل</button>
+<button class="stopBtn" onclick="stopAll()"><i class="ti ti-player-stop"></i>إيقاف الكل</button>
 </div>
 
 </div>
@@ -2438,51 +1304,19 @@ grid-template-columns:1fr;
 <div class="workspace">
 
 <div class="topbar">
-
 <h1>القنوات المباشرة</h1>
-
 <div style="display:flex;align-items:center;gap:10px;position:relative">
-
-<div id="clock"
-class="pill mono"
-style="background:var(--surface-2);color:var(--text-2);border:1px solid var(--border)">
---:--:--
-</div>
-
-<button class="iconBtn"
-onclick="toggleThemeMenu(event)"
-title="تغيير اللون">
-
-<i class="ti ti-palette"></i>
-
-</button>
-
-<div id="connStatus" class="pill conn-bad">
-<i class="ti ti-loader-2"></i>
-اتصال...
-</div>
+<div id="clock" class="pill mono" style="background:var(--surface-2);color:var(--text-2);border:1px solid var(--border)">--:--:--</div>
+<button class="iconBtn" onclick="toggleThemeMenu(event)" title="تغيير اللون"><i class="ti ti-palette"></i></button>
+<div id="connStatus" class="pill conn-bad"><i class="ti ti-loader-2"></i>اتصال...</div>
 
 <div class="themeMenu" id="themeMenu">
-
-<button data-a="blue" onclick="setAccent('blue')">
-<span class="swatch" style="background:#2563EB"></span>
-أزرق
-</button>
-
-<button data-a="teal" onclick="setAccent('teal')">
-<span class="swatch" style="background:#0F6E56"></span>
-أخضر مائي
-</button>
-
-<button data-a="amber" onclick="setAccent('amber')">
-<span class="swatch" style="background:#854F0B"></span>
-كهرماني
-</button>
-
+<button data-a="blue" onclick="setAccent('blue')"><span class="swatch" style="background:#2563EB"></span>أزرق</button>
+<button data-a="teal" onclick="setAccent('teal')"><span class="swatch" style="background:#0F6E56"></span>أخضر مائي</button>
+<button data-a="amber" onclick="setAccent('amber')"><span class="swatch" style="background:#854F0B"></span>كهرماني</button>
 </div>
 
 </div>
-
 </div>
 
 <div class="content">
@@ -2492,23 +1326,15 @@ title="تغيير اللون">
 <div id="statsBar" class="statGrid"></div>
 
 <div class="toolbar">
-
-<input
-id="searchBox"
-placeholder="بحث عن قناة..."
-oninput="onSearch(this.value)"
->
-
+<input id="searchBox" placeholder="بحث عن قناة..." oninput="onSearch(this.value)">
 <select id="categorySelect" onchange="onCategory(this.value)">
 <option value="">كل التصنيفات</option>
 </select>
-
 <select id="sortSelect" onchange="onSort(this.value)">
 <option value="status">ترتيب: الحالة</option>
 <option value="uptime">ترتيب: الأطول بثًا</option>
 <option value="name">ترتيب: الاسم</option>
 </select>
-
 </div>
 
 <div id="list" class="grid"></div>
@@ -2520,94 +1346,36 @@ oninput="onSearch(this.value)"
 <div class="formCard">
 
 <label>معرف القناة (Channel ID)</label>
-
-<input
-id="f_id"
-placeholder="ch12"
->
+<input id="f_id" placeholder="ch12">
 
 <label>رابط البث (Input URL)</label>
-
-<input
-id="f_input"
-placeholder="rtmp:// or http://..."
->
-
-<div class="hint">
-تقدر تحط رابط بث مباشر على يوتيوب مباشرة
-(youtube.com/watch?v=... أو youtube.com/live/...)
-والسيرفر يستخرج رابط البث الحقيقي منه تلقائيًا
-</div>
+<input id="f_input" placeholder="rtmp:// or http://...">
+<div class="hint">تقدر تحط رابط بث مباشر على يوتيوب مباشرة (youtube.com/watch?v=... أو youtube.com/live/...) والسيرفر يستخرج رابط البث الحقيقي منه تلقائي</div>
 
 <label>رابط الإخراج (RTMP Output)</label>
-
-<input
-id="f_output"
-placeholder="rtmp://..."
->
-
-<div class="hint">
-لو الرابط يحتوي على /jaco/ سيتم التعرف عليه تلقائيًا كبروتوكول JACO
-</div>
+<input id="f_output" placeholder="rtmp://...">
 
 <label>رابط اللوجو (Logo URL)</label>
-
-<input
-id="f_logo"
-placeholder="https://.../logo.png"
->
-
-<div class="hint">
-اختياري — صورة صغيرة تظهر جنب اسم القناة
-</div>
+<input id="f_logo" placeholder="https://.../logo.png">
+<div class="hint">اختياري — صورة صغيرة تظهر جنب اسم القناة</div>
 
 <label>التصنيف (Category)</label>
-
-<input
-id="f_category"
-placeholder="أفلام، رياضة، أطفال..."
->
-
-<div class="hint">
-اختياري — بيستخدم في الفلترة أعلى القائمة
-</div>
+<input id="f_category" placeholder="أفلام، رياضة، أطفال...">
+<div class="hint">اختياري — بيستخدم في الفلترة أعلى القائمة</div>
 
 <label>رابط المشاهدة الأصلي (m3u8)</label>
-
-<input
-id="f_watchUrl"
-placeholder="https://.../stream.m3u8"
->
-
-<div class="hint">
-اختياري — لو ضفته، السيرفر يعد المشاهدين الحقيقيين اللي بيدخلوا
-</div>
+<input id="f_watchUrl" placeholder="https://.../stream.m3u8">
+<div class="hint">اختياري — لو ضفته، السيرفر يعد المشاهدين الحقيقيين اللي بيدخلوا</div>
 
 <label>جودة البث (Quality)</label>
-
 <select id="f_quality">
-
-<option value="high">
-عالية — 1080p (أعلى حمل على المعالج)
-</option>
-
-<option value="medium">
-متوسطة — 720p
-</option>
-
-<option value="low">
-منخفضة — 480p (أخف حمل، مناسب لتشغيل قنوات كتير مع بعض)
-</option>
-
+<option value="high">عالية — 1080p (أعلى حمل على المعالج)</option>
+<option value="medium">متوسطة — 720p</option>
+<option value="low">منخفضة — 480p (أخف حمل، مناسب لتشغيل قنوات كتير مع بعض)</option>
 </select>
+<div class="hint">قلل الجودة للقنوات الأقل أهمية عشان تقدر تشغّل قنوات أكتر مع بعض من غير ما السيرفر يقف</div>
 
-<div class="hint">
-قلل الجودة للقنوات الأقل أهمية عشان تقدر تشغّل قنوات أكتر مع بعض من غير ما السيرفر يقف
-</div>
-
-<button class="submit" onclick="addChannel()">
-إضافة القناة
-</button>
+<button class="submit" onclick="addChannel()">إضافة القناة</button>
 
 </div>
 
@@ -2625,41 +1393,21 @@ placeholder="https://.../stream.m3u8"
 
 </div>
 
-<div class="logOverlay"
-id="logOverlay"
-onclick="closeLogs(event)"
->
-
-<div class="logModal"
-onclick="event.stopPropagation()"
->
+<div class="logOverlay" id="logOverlay" onclick="closeLogs(event)">
+<div class="logModal" onclick="event.stopPropagation()">
 
 <div class="logHeader">
-
-<h3 id="logTitle">
-لوج القناة
-</h3>
-
-<button onclick="closeLogs()">
-إغلاق
-</button>
-
+<h3 id="logTitle">لوج القناة</h3>
+<button onclick="closeLogs()">إغلاق</button>
 </div>
 
-<div class="logBody"
-id="logBody">
-</div>
+<div class="logBody" id="logBody"></div>
 
 <div class="logHeader">
-
-<button onclick="refreshLogs()">
-تحديث
-</button>
-
+<button onclick="refreshLogs()">تحديث</button>
 </div>
 
 </div>
-
 </div>
 
 <script>
@@ -2667,1826 +1415,572 @@ id="logBody">
 let channelsCache = {};
 let statusCache = {};
 let eventsCache = [];
-
 let searchTerm = "";
 let categoryFilter = "";
 let sortMode = "status";
 
-// حالة التعديل داخل الصفحة
+// حالة التعديل داخل الصفحة (بدون نافذة منبثقة)
 let editingId = null;
 let editDraft = {};
 
-// ===============================
-// 🔌 اكتشاف نوع البروتوكول تلقائيًا
-// ===============================
-function detectProtocol(output){
-
-const value = (output || "")
-.trim()
-.toLowerCase();
-
-if(
-value.includes("/jaco/") ||
-value.includes("rtmp://101.46.62.149/jaco/")
-){
-return "jaco";
-}
-
-return "rtmp";
-
-}
-
-function getProtocolLabel(output){
-
-return detectProtocol(output) === "jaco"
-? "JACO"
-: "RTMP";
-
-}
-
-// ===============================
-// ✏️ EDIT DRAFT
-// ===============================
 function updateDraft(id, field, val){
-
-if(!editDraft[id]){
-editDraft[id] = {};
-}
-
+if(!editDraft[id]) editDraft[id] = {};
 editDraft[id][field] = val;
-
 }
 
-// ===============================
-// 🖼️ IMAGE FALLBACK
-// ===============================
 function imgFallback(el){
-
-el.parentElement.innerHTML =
-'<i class="ti ti-device-tv"></i>';
-
+el.parentElement.innerHTML = '<i class="ti ti-device-tv"></i>';
 }
 
-// ===============================
-// 🔗 COPY WATCH LINK
-// ===============================
 function copyWatchLink(id){
-
-const link =
-window.location.origin +
-"/watch/" +
-id +
-".m3u8";
-
-navigator.clipboard?.writeText(link)
-
-.then(()=>{
-
-alert(
-"تم نسخ رابط المشاهدة:\\n" +
-link
-);
-
-})
-
-.catch(()=>{
-
-prompt(
-"انسخ الرابط يدويًا:",
-link
-);
-
+const link = window.location.origin + "/watch/" + id + ".m3u8";
+navigator.clipboard?.writeText(link).then(()=>{
+alert("تم نسخ رابط المشاهدة:\\n" + link);
+}).catch(()=>{
+prompt("انسخ الرابط يدويًا:", link);
 });
-
 }
 
-// ===============================
-// 🕐 CLOCK
-// ===============================
 function updateClock(){
-
-const el =
-document.getElementById("clock");
-
+const el = document.getElementById("clock");
 if(!el) return;
-
 const now = new Date();
-
-const pad =
-n => String(n).padStart(2,"0");
-
-el.textContent =
-pad(now.getHours()) +
-":" +
-pad(now.getMinutes()) +
-":" +
-pad(now.getSeconds());
-
+const pad = n => String(n).padStart(2,"0");
+el.textContent = pad(now.getHours()) + ":" + pad(now.getMinutes()) + ":" + pad(now.getSeconds());
 }
-
 updateClock();
+setInterval(updateClock, 1000);
 
-setInterval(updateClock,1000);
-
-// ===============================
-// ⏱️ FORMAT DURATION
-// ===============================
 function formatDuration(totalSeconds){
-
-totalSeconds =
-totalSeconds || 0;
-
-const h =
-Math.floor(totalSeconds / 3600);
-
-const m =
-Math.floor(
-(totalSeconds % 3600) / 60
-);
-
-const s =
-Math.floor(totalSeconds % 60);
-
-const pad =
-n => String(n).padStart(2,"0");
-
-if(h > 0){
-
-return (
-h +
-":" +
-pad(m) +
-":" +
-pad(s)
-);
-
+totalSeconds = totalSeconds || 0;
+const h = Math.floor(totalSeconds / 3600);
+const m = Math.floor((totalSeconds % 3600) / 60);
+const s = Math.floor(totalSeconds % 60);
+const pad = n => String(n).padStart(2,"0");
+if(h > 0) return h + ":" + pad(m) + ":" + pad(s);
+return m + ":" + pad(s);
 }
 
-return (
-m +
-":" +
-pad(s)
-);
-
-}
-
-// ===============================
-// 🎨 ACCENT
-// ===============================
 function setAccent(name){
-
-document.documentElement.setAttribute(
-"data-accent",
-name === "blue" ? "" : name
-);
-
-try{
-
-localStorage.setItem(
-"iptv_accent",
-name
-);
-
-}catch(e){}
-
-document
-.querySelectorAll("#themeMenu button")
-.forEach(b=>{
-
-b.classList.toggle(
-"themeActive",
-b.dataset.a === name
-);
-
+document.documentElement.setAttribute("data-accent", name === "blue" ? "" : name);
+try{ localStorage.setItem("iptv_accent", name); }catch(e){}
+document.querySelectorAll("#themeMenu button").forEach(b => {
+b.classList.toggle("themeActive", b.dataset.a === name);
 });
-
-document
-.getElementById("themeMenu")
-.classList.remove("show");
-
+document.getElementById("themeMenu").classList.remove("show");
 }
 
 function toggleThemeMenu(e){
-
 e.stopPropagation();
-
-document
-.getElementById("themeMenu")
-.classList.toggle("show");
-
+document.getElementById("themeMenu").classList.toggle("show");
 }
 
-document.addEventListener("click",()=>{
-
-document
-.getElementById("themeMenu")
-.classList.remove("show");
-
+document.addEventListener("click", () => {
+document.getElementById("themeMenu").classList.remove("show");
 });
 
 (function initAccent(){
-
 let saved = "blue";
-
-try{
-
-saved =
-localStorage.getItem("iptv_accent") ||
-"blue";
-
-}catch(e){}
-
+try{ saved = localStorage.getItem("iptv_accent") || "blue"; }catch(e){}
 setAccent(saved);
-
 })();
 
-// ===============================
-// 📱 MOBILE MENU
-// ===============================
 function toggleMenu(){
-
-document
-.getElementById("sideMenu")
-.classList.toggle("open");
-
-document
-.getElementById("overlay")
-.classList.toggle("show");
-
+document.getElementById("sideMenu").classList.toggle("open");
+document.getElementById("overlay").classList.toggle("show");
 }
 
 function closeMenu(){
-
-document
-.getElementById("sideMenu")
-.classList.remove("open");
-
-document
-.getElementById("overlay")
-.classList.remove("show");
-
+document.getElementById("sideMenu").classList.remove("open");
+document.getElementById("overlay").classList.remove("show");
 }
 
-// ===============================
-// 🧭 NAVIGATION
-// ===============================
 function show(id){
+document.getElementById("channels").style.display = (id === "channels") ? "block" : "none";
+document.getElementById("add").style.display = (id === "add") ? "block" : "none";
+document.getElementById("events").style.display = (id === "events") ? "block" : "none";
 
-document.getElementById("channels").style.display =
-(id === "channels")
-? "block"
-: "none";
-
-document.getElementById("add").style.display =
-(id === "add")
-? "block"
-: "none";
-
-document.getElementById("events").style.display =
-(id === "events")
-? "block"
-: "none";
-
-document
-.getElementById("navChannels")
-.classList.toggle(
-"navActive",
-id === "channels"
-);
-
-document
-.getElementById("navAdd")
-.classList.toggle(
-"navActive",
-id === "add"
-);
-
-document
-.getElementById("navEvents")
-.classList.toggle(
-"navActive",
-id === "events"
-);
-
+document.getElementById("navChannels").classList.toggle("navActive", id === "channels");
+document.getElementById("navAdd").classList.toggle("navActive", id === "add");
+document.getElementById("navEvents").classList.toggle("navActive", id === "events");
 }
 
-// ===============================
-// 📊 STATS
-// ===============================
 function renderStats(){
 
-const box =
-document.getElementById("statsBar");
-
+const box = document.getElementById("statsBar");
 if(!box) return;
 
-let live = 0;
-let off = 0;
-
-let bitrateSum = 0;
-let bitrateCount = 0;
+let live = 0, off = 0, bitrateSum = 0, bitrateCount = 0;
 
 for(const id in channelsCache){
-
 if(statusCache[id]?.active){
-
 live++;
-
 if(statusCache[id]?.bitrateKbps){
-
-bitrateSum +=
-statusCache[id].bitrateKbps;
-
+bitrateSum += statusCache[id].bitrateKbps;
 bitrateCount++;
-
 }
-
-}else{
-
+} else {
 off++;
-
+}
 }
 
-}
-
-const restarts =
-eventsCache.filter(
-e => e.type === "restart"
-).length;
-
-const avgBitrate =
-bitrateCount > 0
-? Math.round(
-bitrateSum / bitrateCount
-)
-: 0;
+const restarts = eventsCache.filter(e => e.type === "restart").length;
+const avgBitrate = bitrateCount > 0 ? Math.round(bitrateSum / bitrateCount) : 0;
 
 box.innerHTML = \`
-
 <div class="statCard ok">
-
-<div class="lbl">
-<i class="ti ti-broadcast"></i>
-شغالة
+<div class="lbl"><i class="ti ti-broadcast"></i>شغالة</div>
+<div class="num mono">\${live}</div>
 </div>
-
-<div class="num mono">
-\${live}
-</div>
-
-</div>
-
 <div class="statCard off">
-
-<div class="lbl">
-<i class="ti ti-player-stop"></i>
-متوقفة
+<div class="lbl"><i class="ti ti-player-stop"></i>متوقفة</div>
+<div class="num mono">\${off}</div>
 </div>
-
-<div class="num mono">
-\${off}
-</div>
-
-</div>
-
 <div class="statCard accent">
-
-<div class="lbl">
-<i class="ti ti-gauge"></i>
-متوسط البت ريت
+<div class="lbl"><i class="ti ti-gauge"></i>متوسط البت ريت</div>
+<div class="num mono">\${avgBitrate}<span style="font-size:13px">kbps</span></div>
 </div>
-
-<div class="num mono">
-\${avgBitrate}
-<span style="font-size:13px">
-kbps
-</span>
-</div>
-
-</div>
-
 <div class="statCard warn">
-
-<div class="lbl">
-<i class="ti ti-refresh"></i>
-إعادة تشغيل
+<div class="lbl"><i class="ti ti-refresh"></i>إعادة تشغيل</div>
+<div class="num mono">\${restarts}</div>
 </div>
-
-<div class="num mono">
-\${restarts}
-</div>
-
-</div>
-
 \`;
 
 }
 
-// ===============================
-// 🗂️ CATEGORY OPTIONS
-// ===============================
 function refreshCategoryOptions(){
 
-const sel =
-document.getElementById(
-"categorySelect"
-);
-
+const sel = document.getElementById("categorySelect");
 const current = sel.value;
 
 const cats = new Set();
-
 for(const id in channelsCache){
-
-const c =
-channelsCache[id].category;
-
-if(c){
-cats.add(c);
+const c = channelsCache[id].category;
+if(c) cats.add(c);
 }
 
-}
-
-sel.innerHTML =
-'<option value="">كل التصنيفات</option>' +
-
-Array.from(cats)
-.map(
-c =>
-'<option value="' +
-c +
-'">' +
-c +
-'</option>'
-)
-.join("");
+sel.innerHTML = '<option value="">كل التصنيفات</option>' +
+Array.from(cats).map(c => '<option value="' + c + '">' + c + '</option>').join("");
 
 sel.value = current;
 
 }
 
-// ===============================
-// 🔢 SORT
-// ===============================
 function sortedChannelIds(){
 
-let ids =
-Object.keys(channelsCache);
+let ids = Object.keys(channelsCache);
 
-const term =
-searchTerm
-.trim()
-.toLowerCase();
-
+const term = searchTerm.trim().toLowerCase();
 if(term){
-
-ids =
-ids.filter(id =>
-id.toLowerCase().includes(term)
-);
-
+ids = ids.filter(id => id.toLowerCase().includes(term));
 }
 
 if(categoryFilter){
-
-ids =
-ids.filter(
-id =>
-channelsCache[id].category ===
-categoryFilter
-);
-
+ids = ids.filter(id => channelsCache[id].category === categoryFilter);
 }
 
 if(sortMode === "status"){
-
-ids.sort((a,b)=>{
-
-const aA =
-statusCache[a]?.active
-? 1
-: 0;
-
-const bA =
-statusCache[b]?.active
-? 1
-: 0;
-
+ids.sort((a,b) => {
+const aA = statusCache[a]?.active ? 1 : 0;
+const bA = statusCache[b]?.active ? 1 : 0;
 return bA - aA;
-
 });
-
-}
-
-else if(sortMode === "uptime"){
-
-ids.sort((a,b)=>
-(
-statusCache[b]?.uptimeSeconds || 0
-) -
-(
-statusCache[a]?.uptimeSeconds || 0
-)
-);
-
-}
-
-else if(sortMode === "name"){
-
-ids.sort(
-(a,b) =>
-a.localeCompare(b)
-);
-
+} else if(sortMode === "uptime"){
+ids.sort((a,b) => (statusCache[b]?.uptimeSeconds||0) - (statusCache[a]?.uptimeSeconds||0));
+} else if(sortMode === "name"){
+ids.sort((a,b) => a.localeCompare(b));
 }
 
 return ids;
 
 }
 
-function onSearch(val){
+function onSearch(val){ searchTerm = val; render(); }
+function onCategory(val){ categoryFilter = val; render(); }
+function onSort(val){ sortMode = val; render(); }
 
-searchTerm = val;
-
-render();
-
-}
-
-function onCategory(val){
-
-categoryFilter = val;
-
-render();
-
-}
-
-function onSort(val){
-
-sortMode = val;
-
-render();
-
-}
-
-// ===============================
-// 🖥️ RENDER
-// ===============================
 function render(){
 
 renderStats();
-
 refreshCategoryOptions();
 
-const box =
-document.getElementById("list");
-
+const box = document.getElementById("list");
 box.innerHTML = "";
 
-const ids =
-sortedChannelIds();
+const ids = sortedChannelIds();
 
 for(const id of ids){
 
-const isOn =
-!!statusCache[id]?.active;
-
-const uptimeSeconds =
-statusCache[id]?.uptimeSeconds || 0;
-
-const totalSeconds =
-statusCache[id]?.totalSeconds || 0;
-
-const bitrateKbps =
-statusCache[id]?.bitrateKbps;
-
-const currentViewers =
-statusCache[id]?.currentViewers || 0;
-
-const totalViewers =
-statusCache[id]?.totalViewers || 0;
-
-const ch =
-channelsCache[id];
-
-const logoUrl =
-ch.logo || "";
-
-const category =
-ch.category || "";
-
-const qualityLabel =
-{
-high:"1080p",
-medium:"720p",
-low:"480p"
-}[ch.quality] || "1080p";
-
-const protocol =
-ch.protocol ||
-detectProtocol(ch.output);
-
-const protocolLabel =
-protocol === "jaco"
-? "JACO"
-: "RTMP";
-
-const protocolClass =
-protocol === "jaco"
-? "jaco"
-: "rtmp";
+const isOn = !!statusCache[id]?.active;
+const uptimeSeconds = statusCache[id]?.uptimeSeconds || 0;
+const totalSeconds = statusCache[id]?.totalSeconds || 0;
+const bitrateKbps = statusCache[id]?.bitrateKbps;
+const currentViewers = statusCache[id]?.currentViewers || 0;
+const totalViewers = statusCache[id]?.totalViewers || 0;
+const ch = channelsCache[id];
+const logoUrl = ch.logo || "";
+const category = ch.category || "";
+const qualityLabel = { high: "1080p", medium: "720p", low: "480p" }[ch.quality] || "1080p";
 
 box.innerHTML += \`
-
 <div class="card">
 
 <div class="cardHead">
-
-<div class="logoBox">
-
-\${
-logoUrl
-?
-'<img src="' +
-logoUrl +
-'" onerror="imgFallback(this)">'
-:
-'<i class="ti ti-device-tv"></i>'
-}
-
-</div>
-
+<div class="logoBox">\${logoUrl ? '<img src="'+logoUrl+'" onerror="imgFallback(this)">' : '<i class="ti ti-device-tv"></i>'}</div>
 <div class="titleWrap">
-
-<h3>
-\${id}
-</h3>
-
-\${category
-?
-'<span class="catTag">' +
-category +
-'</span>'
-:
-''
-}
-
-<span
-class="catTag mono"
-style="margin-right:6px"
->
-\${qualityLabel}
-</span>
-
-<span
-class="protocolTag \${protocolClass}"
->
-\${protocolLabel}
-</span>
-
+<h3>\${id}</h3>
+\${category ? '<span class="catTag">'+category+'</span>' : ''}
+<span class="catTag mono" style="margin-right:6px">\${qualityLabel}</span>
 </div>
-
-<div class="statusPill \${isOn ? 'on' : 'off'}">
-
-<i class="ti ti-point-filled"></i>
-
-\${isOn ? 'شغالة' : 'متوقفة'}
-
-</div>
-
+<div class="statusPill \${isOn ? 'on' : 'off'}"><i class="ti ti-point-filled"></i>\${isOn ? 'شغالة' : 'متوقفة'}</div>
 </div>
 
 \${ editingId === id ? \`
 
 <div class="editField">
-
-<div class="tLbl">
-INPUT URL
-</div>
-
-<input
-value="\${(editDraft[id]?.input ?? ch.input ?? '').replace(/"/g,'&quot;')}"
-oninput="updateDraft('\${id}','input',this.value)"
->
-
+<div class="tLbl">INPUT URL</div>
+<input value="\${(editDraft[id]?.input ?? ch.input ?? '').replace(/"/g,'&quot;')}" oninput="updateDraft('\${id}','input',this.value)">
 </div>
 
 <div class="editField">
-
-<div class="tLbl">
-RTMP OUTPUT
-</div>
-
-<input
-value="\${(editDraft[id]?.output ?? ch.output ?? '').replace(/"/g,'&quot;')}"
-oninput="updateDraft('\${id}','output',this.value)"
->
-
+<div class="tLbl">RTMP OUTPUT</div>
+<input value="\${(editDraft[id]?.output ?? ch.output ?? '').replace(/"/g,'&quot;')}" oninput="updateDraft('\${id}','output',this.value)">
 </div>
 
 <div class="editField">
-
-<div class="tLbl">
-PROTOCOL — AUTO
-</div>
-
-<input
-value="\${getProtocolLabel(editDraft[id]?.output ?? ch.output ?? '')}"
-readonly
->
-
+<div class="tLbl">LOGO URL</div>
+<input value="\${(editDraft[id]?.logo ?? ch.logo ?? '').replace(/"/g,'&quot;')}" oninput="updateDraft('\${id}','logo',this.value)">
 </div>
 
 <div class="editField">
-
-<div class="tLbl">
-LOGO URL
-</div>
-
-<input
-value="\${(editDraft[id]?.logo ?? ch.logo ?? '').replace(/"/g,'&quot;')}"
-oninput="updateDraft('\${id}','logo',this.value)"
->
-
+<div class="tLbl">CATEGORY</div>
+<input value="\${(editDraft[id]?.category ?? ch.category ?? '').replace(/"/g,'&quot;')}" oninput="updateDraft('\${id}','category',this.value)">
 </div>
 
 <div class="editField">
-
-<div class="tLbl">
-CATEGORY
-</div>
-
-<input
-value="\${(editDraft[id]?.category ?? ch.category ?? '').replace(/"/g,'&quot;')}"
-oninput="updateDraft('\${id}','category',this.value)"
->
-
+<div class="tLbl">رابط المشاهدة الأصلي (WATCH URL)</div>
+<input value="\${(editDraft[id]?.watchUrl ?? ch.watchUrl ?? '').replace(/"/g,'&quot;')}" oninput="updateDraft('\${id}','watchUrl',this.value)">
 </div>
 
 <div class="editField">
-
-<div class="tLbl">
-رابط المشاهدة الأصلي (WATCH URL)
-</div>
-
-<input
-value="\${(editDraft[id]?.watchUrl ?? ch.watchUrl ?? '').replace(/"/g,'&quot;')}"
-oninput="updateDraft('\${id}','watchUrl',this.value)"
->
-
-</div>
-
-<div class="editField">
-
-<div class="tLbl">
-جودة البث (QUALITY)
-</div>
-
-<select
-onchange="updateDraft('\${id}','quality',this.value)"
->
-
-<option
-value="high"
-\${(editDraft[id]?.quality ?? ch.quality ?? 'high') === 'high' ? 'selected' : ''}
->
-عالية — 1080p
-</option>
-
-<option
-value="medium"
-\${(editDraft[id]?.quality ?? ch.quality) === 'medium' ? 'selected' : ''}
->
-متوسطة — 720p
-</option>
-
-<option
-value="low"
-\${(editDraft[id]?.quality ?? ch.quality) === 'low' ? 'selected' : ''}
->
-منخفضة — 480p
-</option>
-
+<div class="tLbl">جودة البث (QUALITY)</div>
+<select onchange="updateDraft('\${id}','quality',this.value)">
+<option value="high" \${(editDraft[id]?.quality ?? ch.quality ?? 'high') === 'high' ? 'selected' : ''}>عالية — 1080p</option>
+<option value="medium" \${(editDraft[id]?.quality ?? ch.quality) === 'medium' ? 'selected' : ''}>متوسطة — 720p</option>
+<option value="low" \${(editDraft[id]?.quality ?? ch.quality) === 'low' ? 'selected' : ''}>منخفضة — 480p</option>
 </select>
-
 </div>
 
 <div class="editActions">
-
-<button
-class="saveBtn"
-onclick="saveEdit('\${id}')"
->
-حفظ
-</button>
-
-<button
-class="cancelBtn"
-onclick="cancelEdit()"
->
-إلغاء
-</button>
-
+<button class="saveBtn" onclick="saveEdit('\${id}')">حفظ</button>
+<button class="cancelBtn" onclick="cancelEdit()">إلغاء</button>
 </div>
 
 \` : \`
 
 <div class="readoutRow">
-
 <div class="readoutBox">
-
-<div class="rLbl">
-مشاهدين الآن
+<div class="rLbl">مشاهدين الآن</div>
+<div class="rVal">\${ch.watchUrl ? currentViewers : '—'}</div>
 </div>
-
-<div class="rVal">
-\${ch.watchUrl ? currentViewers : '—'}
-</div>
-
-</div>
-
 <div class="readoutBox">
-
-<div class="rLbl">
-إجمالي المشاهدين
+<div class="rLbl">إجمالي المشاهدين</div>
+<div class="rVal">\${ch.watchUrl ? totalViewers : '—'}</div>
 </div>
-
-<div class="rVal">
-\${ch.watchUrl ? totalViewers : '—'}
-</div>
-
-</div>
-
 </div>
 
 \${ ch.watchUrl ? \`
-
 <div class="techLine">
-
-<div class="tLbl">
-رابط المشاهدة (شارك ده مع الجمهور)
+<div class="tLbl">رابط المشاهدة (شارك ده مع الجمهور)</div>
+<span class="tVal" style="color:var(--accent);cursor:pointer" title="اضغط للنسخ" onclick="copyWatchLink('\${id}')">\${window.location.origin}/watch/\${id}.m3u8</span>
 </div>
-
-<span
-class="tVal"
-style="color:var(--accent);cursor:pointer"
-title="اضغط للنسخ"
-onclick="copyWatchLink('\${id}')"
->
-\${window.location.origin}/watch/\${id}.m3u8
-</span>
-
-</div>
-
 \` : \`
-
 <div class="techLine">
-
-<span
-class="tVal"
-style="color:var(--text-3)"
->
-مفيش رابط مشاهدة مضاف — اضغط تعديل لإضافته
-</span>
-
+<span class="tVal" style="color:var(--text-3)">مفيش رابط مشاهدة مضاف — اضغط تعديل لإضافته</span>
 </div>
-
 \` }
 
 <div class="techLine">
-
-<div class="tLbl">
-مدة البث الحالية · إجمالي وقت البث
-</div>
-
-<span class="tVal">
-
-\${isOn
-? formatDuration(uptimeSeconds)
-: '—'}
-
-·
-
-\${formatDuration(totalSeconds)}
-
-</span>
-
+<div class="tLbl">مدة البث الحالية · إجمالي وقت البث</div>
+<span class="tVal">\${isOn ? formatDuration(uptimeSeconds) : '—'} · \${formatDuration(totalSeconds)}</span>
 </div>
 
 <div class="techLine">
-
-<div class="tLbl">
-BITRATE
-</div>
-
-<span class="tVal">
-
-\${bitrateKbps
-? bitrateKbps + ' kbps'
-: '—'}
-
-</span>
-
+<div class="tLbl">BITRATE</div>
+<span class="tVal">\${bitrateKbps ? bitrateKbps + ' kbps' : '—'}</span>
 </div>
 
 <div class="techLine">
-
-<div class="tLbl">
-PROTOCOL
-</div>
-
-<span
-class="tVal"
-style="color:\${protocol === 'jaco' ? 'var(--accent)' : 'var(--text-2)'}"
->
-\${protocolLabel}
-</span>
-
+<div class="tLbl">INPUT</div>
+<span class="tVal" title="\${ch.input || ''}">\${ch.input || '—'}</span>
 </div>
 
 <div class="techLine">
-
-<div class="tLbl">
-INPUT
-</div>
-
-<span
-class="tVal"
-title="\${ch.input || ''}"
->
-\${ch.input || '—'}
-</span>
-
-</div>
-
-<div class="techLine">
-
-<div class="tLbl">
-OUTPUT
-</div>
-
-<span
-class="tVal"
-title="\${ch.output || ''}"
->
-\${ch.output || '—'}
-</span>
-
+<div class="tLbl">OUTPUT</div>
+<span class="tVal" title="\${ch.output || ''}">\${ch.output || '—'}</span>
 </div>
 
 <div class="btnRow">
-
-<button
-class="iBtn go"
-onclick="start('\${id}')"
-title="تشغيل"
->
-<i class="ti ti-player-play"></i>
-</button>
-
-<button
-class="iBtn stop"
-onclick="stop('\${id}')"
-title="إيقاف"
->
-<i class="ti ti-player-stop"></i>
-</button>
-
-<button
-class="iBtn"
-onclick="editChannel('\${id}')"
-title="تعديل"
->
-<i class="ti ti-edit"></i>
-</button>
-
-<button
-class="iBtn"
-onclick="showLogs('\${id}')"
-title="اللوج"
->
-<i class="ti ti-file-text"></i>
-</button>
-
-<button
-class="iBtn"
-onclick="del('\${id}')"
-title="حذف"
->
-<i class="ti ti-trash"></i>
-</button>
-
+<button class="iBtn go" onclick="start('\${id}')" title="تشغيل"><i class="ti ti-player-play"></i></button>
+<button class="iBtn stop" onclick="stop('\${id}')" title="إيقاف"><i class="ti ti-player-stop"></i></button>
+<button class="iBtn" onclick="editChannel('\${id}')" title="تعديل"><i class="ti ti-edit"></i></button>
+<button class="iBtn" onclick="showLogs('\${id}')" title="اللوج"><i class="ti ti-file-text"></i></button>
+<button class="iBtn" onclick="del('\${id}')" title="حذف"><i class="ti ti-trash"></i></button>
 </div>
 
 \` }
 
 </div>
-
 \`;
 
 }
 
 if(ids.length === 0){
-
-box.innerHTML =
-'<div style="grid-column:1/-1;padding:30px;text-align:center;color:var(--text-3)">لا يوجد قنوات مطابقة</div>';
-
+box.innerHTML = '<div style="grid-column:1/-1;padding:30px;text-align:center;color:var(--text-3)">لا يوجد قنوات مطابقة</div>';
 }
 
 }
 
-// ===============================
-// 📡 LOAD CHANNELS + STATUS
-// ===============================
 async function load(){
+const ch = await fetch("/channels");
+channelsCache = await ch.json();
 
-try{
-
-const ch =
-await fetch("/channels");
-
-channelsCache =
-await ch.json();
-
-const st =
-await fetch("/status");
-
-statusCache =
-await st.json();
+const st = await fetch("/status");
+statusCache = await st.json();
 
 render();
-
-}catch(e){
-
-console.error("LOAD ERROR:",e);
-
 }
 
-}
-
-// ===============================
-// 📋 EVENTS
-// ===============================
 async function loadEvents(){
-
-try{
-
-const r =
-await fetch("/events");
-
-eventsCache =
-await r.json();
-
+const r = await fetch("/events");
+eventsCache = await r.json();
 renderEvents();
 renderStats();
-
-}catch(e){
-
-console.error("EVENTS ERROR:",e);
-
-}
-
 }
 
 function eventMeta(type){
-
-if(type === "start")
-return {
-icon:"ti-player-play",
-cls:"on",
-text:"تشغيل"
-};
-
-if(type === "stop")
-return {
-icon:"ti-player-stop",
-cls:"off",
-text:"إيقاف"
-};
-
-if(type === "exit")
-return {
-icon:"ti-alert-triangle",
-cls:"off",
-text:"خروج غير متوقع"
-};
-
-if(type === "restart")
-return {
-icon:"ti-refresh",
-cls:"warn",
-text:"إعادة تشغيل"
-};
-
-return {
-icon:"ti-point",
-cls:"",
-text:type
-};
-
+if(type === "start") return { icon:"ti-player-play", cls:"on", text:"تشغيل" };
+if(type === "stop") return { icon:"ti-player-stop", cls:"off", text:"إيقاف" };
+if(type === "exit") return { icon:"ti-alert-triangle", cls:"off", text:"خروج غير متوقع" };
+if(type === "restart") return { icon:"ti-refresh", cls:"warn", text:"إعادة تشغيل" };
+return { icon:"ti-point", cls:"", text:type };
 }
 
 function renderEvents(){
 
-const box =
-document.getElementById(
-"eventsList"
-);
-
+const box = document.getElementById("eventsList");
 if(!box) return;
 
 if(eventsCache.length === 0){
-
-box.innerHTML =
-'<div class="evRow" style="color:var(--text-3)">لا يوجد أحداث بعد</div>';
-
+box.innerHTML = '<div class="evRow" style="color:var(--text-3)">لا يوجد أحداث بعد</div>';
 return;
-
 }
 
 box.innerHTML = "";
 
 for(const ev of eventsCache){
 
-const m =
-eventMeta(ev.type);
-
-const t =
-new Date(ev.time);
-
-const timeStr =
-t.toLocaleString("ar-EG");
+const m = eventMeta(ev.type);
+const t = new Date(ev.time);
+const timeStr = t.toLocaleString("ar-EG");
 
 box.innerHTML += \`
-
 <div class="evRow">
-
-<div class="evIcon \${m.cls}">
-
-<i class="ti \${m.icon}"></i>
-
-</div>
-
+<div class="evIcon \${m.cls}"><i class="ti \${m.icon}"></i></div>
 <div class="evBody">
-
-<div class="evTitle">
-
-<span class="mono">
-\${ev.id}
-</span>
-
-—
-
-\${m.text}
-
+<div class="evTitle"><span class="mono">\${ev.id}</span> — \${m.text}</div>
+<div class="evMsg">\${ev.message}</div>
 </div>
-
-<div class="evMsg">
-\${ev.message}
+<div class="evTime">\${timeStr}</div>
 </div>
-
-</div>
-
-<div class="evTime">
-\${timeStr}
-</div>
-
-</div>
-
 \`;
 
 }
 
 }
 
-// ===============================
-// 📜 LOGS
-// ===============================
 let currentLogChannel = null;
 
 async function showLogs(id){
-
 currentLogChannel = id;
-
-document.getElementById(
-"logTitle"
-).innerText =
-"لوج القناة: " + id;
-
-document
-.getElementById("logOverlay")
-.classList.add("show");
-
+document.getElementById("logTitle").innerText = "لوج القناة: " + id;
+document.getElementById("logOverlay").classList.add("show");
 await refreshLogs();
-
 }
 
 function closeLogs(e){
-
-if(
-e &&
-e.target !==
-document.getElementById("logOverlay")
-){
-return;
-}
-
-document
-.getElementById("logOverlay")
-.classList.remove("show");
-
+if(e && e.target !== document.getElementById("logOverlay")) return;
+document.getElementById("logOverlay").classList.remove("show");
 currentLogChannel = null;
-
 }
 
 async function refreshLogs(){
+if(!currentLogChannel) return;
 
-if(!currentLogChannel)
-return;
+const r = await fetch("/logs/" + currentLogChannel);
+const lines = await r.json();
 
-try{
-
-const r =
-await fetch(
-"/logs/" +
-currentLogChannel
-);
-
-const lines =
-await r.json();
-
-const body =
-document.getElementById(
-"logBody"
-);
+const body = document.getElementById("logBody");
 
 if(lines.length === 0){
-
-body.innerHTML =
-'<div class="logLine">لا يوجد سجل بعد لهذه القناة.</div>';
-
+body.innerHTML = '<div class="logLine">لا يوجد سجل بعد لهذه القناة.</div>';
 return;
-
 }
 
-body.innerHTML =
-lines
-.map(l=>{
+body.innerHTML = lines.map(l => {
+const t = new Date(l.time).toLocaleTimeString("en-GB");
+return '<div class="logLine"><span class="logTime">[' + t + ']</span>' + l.line.replace(/</g,"&lt;") + '</div>';
+}).join("");
 
-const t =
-new Date(l.time)
-.toLocaleTimeString("en-GB");
-
-return (
-'<div class="logLine">' +
-'<span class="logTime">[' +
-t +
-']</span>' +
-l.line
-.replace(/</g,"&lt;") +
-'</div>'
-);
-
-})
-.join("");
-
-body.scrollTop =
-body.scrollHeight;
-
-}catch(e){
-
-console.error("LOG ERROR:",e);
-
+body.scrollTop = body.scrollHeight;
 }
 
-}
-
-// ===============================
-// ▶️ START ALL
-// ===============================
 async function startAll(){
-
-if(
-!confirm(
-"تشغيل كل القنوات؟"
-)
-){
-return;
-}
-
+if(!confirm("تشغيل كل القنوات؟")) return;
 await fetch("/start-all");
-
-await load();
-
+load();
 }
 
-// ===============================
-// ⏹️ STOP ALL
-// ===============================
 async function stopAll(){
-
-if(
-!confirm(
-"إيقاف كل القنوات؟"
-)
-){
-return;
-}
-
+if(!confirm("إيقاف كل القنوات؟")) return;
 await fetch("/stop-all");
-
-await load();
-
+load();
 }
 
-// ===============================
-// 🔌 WEBSOCKET
-// ===============================
 let ws;
 let wsReconnectTimer;
 
 function connectWS(){
+const proto = location.protocol === "https:" ? "wss:" : "ws:";
+ws = new WebSocket(proto + "//" + location.host);
 
-const proto =
-location.protocol === "https:"
-? "wss:"
-: "ws:";
-
-ws =
-new WebSocket(
-proto +
-"//" +
-location.host
-);
-
-ws.onopen = ()=>{
-
-const el =
-document.getElementById(
-"connStatus"
-);
-
-el.className =
-"pill conn-ok";
-
-el.innerHTML =
-'<i class="ti ti-plug-connected"></i>متصل مباشر';
-
+ws.onopen = () => {
+document.getElementById("connStatus").className = "pill conn-ok";
+document.getElementById("connStatus").innerHTML = '<i class="ti ti-plug-connected"></i>متصل مباشر';
 };
 
-ws.onclose = ()=>{
-
-const el =
-document.getElementById(
-"connStatus"
-);
-
-el.className =
-"pill conn-bad";
-
-el.innerHTML =
-'<i class="ti ti-plug-connected-x"></i>منقطع - إعادة محاولة...';
-
-clearTimeout(
-wsReconnectTimer
-);
-
-wsReconnectTimer =
-setTimeout(
-connectWS,
-3000
-);
-
+ws.onclose = () => {
+document.getElementById("connStatus").className = "pill conn-bad";
+document.getElementById("connStatus").innerHTML = '<i class="ti ti-plug-connected-x"></i>منقطع - إعادة محاولة...';
+clearTimeout(wsReconnectTimer);
+wsReconnectTimer = setTimeout(connectWS, 3000);
 };
 
-ws.onerror = ()=>{
+ws.onerror = () => ws.close();
 
+ws.onmessage = (msg) => {
 try{
-ws.close();
-}catch(e){}
+const parsed = JSON.parse(msg.data);
 
-};
-
-ws.onmessage = (msg)=>{
-
-try{
-
-const parsed =
-JSON.parse(msg.data);
-
-if(
-parsed.type === "status"
-){
-
-statusCache =
-parsed.data;
-
-if(!editingId){
-
-render();
-
-}
-
-}
-
-else if(
-parsed.type === "event"
-){
-
-eventsCache.unshift(
-parsed.data
-);
-
-if(
-eventsCache.length > 200
-){
-
-eventsCache.pop();
-
-}
-
+if(parsed.type === "status"){
+statusCache = parsed.data;
+if(!editingId) render();
+} else if(parsed.type === "event"){
+eventsCache.unshift(parsed.data);
+if(eventsCache.length > 200) eventsCache.pop();
 renderEvents();
 renderStats();
-
 }
 
 }catch(e){}
-
 };
-
 }
 
-// ===============================
-// ▶️ START CHANNEL
-// ===============================
 async function start(id){
-
-await fetch(
-"/start?id=" +
-encodeURIComponent(id)
-);
-
-await load();
-
+await fetch("/start?id="+id);
+load();
 }
 
-// ===============================
-// ⏹️ STOP CHANNEL
-// ===============================
 async function stop(id){
-
-await fetch(
-"/stop?id=" +
-encodeURIComponent(id)
-);
-
-await load();
-
+await fetch("/stop?id="+id);
+load();
 }
 
-// ===============================
-// ➕ ADD CHANNEL
-// ===============================
 async function addChannel(){
 
-const id =
-document
-.getElementById("f_id")
-.value
-.trim();
-
-const input =
-document
-.getElementById("f_input")
-.value
-.trim();
-
-const output =
-document
-.getElementById("f_output")
-.value
-.trim();
-
-const logo =
-document
-.getElementById("f_logo")
-.value
-.trim();
-
-const category =
-document
-.getElementById("f_category")
-.value
-.trim();
-
-const watchUrl =
-document
-.getElementById("f_watchUrl")
-.value
-.trim();
-
-const quality =
-document
-.getElementById("f_quality")
-.value;
-
-// اكتشاف البروتوكول تلقائيًا
-const protocol =
-detectProtocol(output);
+const id = document.getElementById("f_id").value.trim();
+const input = document.getElementById("f_input").value.trim();
+const output = document.getElementById("f_output").value.trim();
+const logo = document.getElementById("f_logo").value.trim();
+const category = document.getElementById("f_category").value.trim();
+const watchUrl = document.getElementById("f_watchUrl").value.trim();
+const quality = document.getElementById("f_quality").value;
 
 if(!id || !input || !output){
-
-alert(
-"من فضلك املأ معرف القناة، رابط البث، ورابط الإخراج على الأقل"
-);
-
+alert("من فضلك املأ معرف القناة، رابط البث، ورابط الإخراج على الأقل");
 return;
-
 }
 
-try{
-
-const response =
-await fetch(
-"/channel",
-{
+await fetch("/channel",{
 method:"POST",
-headers:{
-"Content-Type":
-"application/json"
-},
-body:JSON.stringify({
+headers:{ "Content-Type":"application/json" },
+body:JSON.stringify({ id, input, output, logo, category, watchUrl, quality })
+});
+
+document.getElementById("f_id").value = "";
+document.getElementById("f_input").value = "";
+document.getElementById("f_output").value = "";
+document.getElementById("f_logo").value = "";
+document.getElementById("f_category").value = "";
+document.getElementById("f_watchUrl").value = "";
+document.getElementById("f_quality").value = "high";
 
-id,
-input,
-output,
-logo,
-category,
-watchUrl,
-quality,
-protocol
-
-})
-}
-);
-
-if(!response.ok){
-
-alert(
-"حدث خطأ أثناء إضافة القناة"
-);
-
-return;
-
-}
-
-document.getElementById(
-"f_id"
-).value = "";
-
-document.getElementById(
-"f_input"
-).value = "";
-
-document.getElementById(
-"f_output"
-).value = "";
-
-document.getElementById(
-"f_logo"
-).value = "";
-
-document.getElementById(
-"f_category"
-).value = "";
-
-document.getElementById(
-"f_watchUrl"
-).value = "";
-
-document.getElementById(
-"f_quality"
-).value = "high";
-
-await load();
-
-show("channels");
-
-}catch(e){
-
-console.error(e);
-
-alert(
-"تعذر الاتصال بالسيرفر"
-);
-
-}
-
-}
-
-// ===============================
-// 🗑️ DELETE
-// ===============================
-async function del(id){
-
-if(
-!confirm(
-"حذف القناة " +
-id +
-"؟"
-)
-){
-return;
-}
-
-await fetch(
-"/channel/" +
-encodeURIComponent(id),
-{
-method:"DELETE"
-}
-);
-
-await load();
-
-}
-
-// ===============================
-// ✏️ EDIT CHANNEL
-// ===============================
-function editChannel(id){
-
-const ch =
-channelsCache[id];
-
-editDraft[id] = {
-
-input:
-ch.input || "",
-
-output:
-ch.output || "",
-
-logo:
-ch.logo || "",
-
-category:
-ch.category || "",
-
-watchUrl:
-ch.watchUrl || "",
-
-quality:
-ch.quality || "high",
-
-protocol:
-ch.protocol ||
-detectProtocol(ch.output)
-
-};
-
-editingId = id;
-
-render();
-
-}
-
-// ===============================
-// 💾 SAVE EDIT
-// ===============================
-async function saveEdit(id){
-
-const draft =
-editDraft[id] || {};
-
-const channel =
-channelsCache[id];
-
-const input =
-draft.input ??
-channel.input ??
-"";
-
-const output =
-draft.output ??
-channel.output ??
-"";
-
-const protocol =
-detectProtocol(output);
-
-try{
-
-const response =
-await fetch(
-"/channel/" +
-encodeURIComponent(id),
-{
-method:"PUT",
-headers:{
-"Content-Type":
-"application/json"
-},
-body:JSON.stringify({
-
-input,
-
-output,
-
-logo:
-draft.logo ??
-channel.logo ??
-"",
-
-category:
-draft.category ??
-channel.category ??
-"",
-
-watchUrl:
-draft.watchUrl ??
-channel.watchUrl ??
-"",
-
-quality:
-draft.quality ??
-channel.quality ??
-"high",
-
-protocol
-
-})
-}
-);
-
-if(!response.ok){
-
-alert(
-"حدث خطأ أثناء حفظ التعديل"
-);
-
-return;
-
-}
-
-editingId = null;
-
-delete editDraft[id];
-
-await load();
-
-}catch(e){
-
-console.error(e);
-
-alert(
-"تعذر الاتصال بالسيرفر"
-);
-
-}
-
-}
-
-// ===============================
-// ❌ CANCEL EDIT
-// ===============================
-function cancelEdit(){
-
-if(editingId){
-
-delete editDraft[
-editingId
-];
-
-}
-
-editingId = null;
-
-render();
-
-}
-
-// ===============================
-// 🚀 INITIALIZE
-// ===============================
 load();
+show("channels");
+}
 
+async function del(id){
+if(!confirm("حذف القناة " + id + "؟")) return;
+await fetch("/channel/"+id,{ method:"DELETE" });
+load();
+}
+
+function editChannel(id){
+editDraft[id] = {
+input: channelsCache[id].input || "",
+output: channelsCache[id].output || "",
+logo: channelsCache[id].logo || "",
+category: channelsCache[id].category || "",
+watchUrl: channelsCache[id].watchUrl || ""
+};
+editingId = id;
+render();
+}
+
+async function saveEdit(id){
+const draft = editDraft[id] || {};
+
+await fetch("/channel/"+id,{
+method:"PUT",
+headers:{ "Content-Type":"application/json" },
+body:JSON.stringify({
+input: draft.input ?? channelsCache[id].input,
+output: draft.output ?? channelsCache[id].output,
+logo: draft.logo ?? "",
+category: draft.category ?? "",
+watchUrl: draft.watchUrl ?? "",
+quality: draft.quality ?? channelsCache[id].quality ?? "high"
+})
+});
+
+editingId = null;
+delete editDraft[id];
+await load();
+}
+
+function cancelEdit(){
+if(editingId) delete editDraft[editingId];
+editingId = null;
+render();
+}
+
+load();
 loadEvents();
-
 connectWS();
 
 setInterval(()=>{
-
-if(
-(!ws ||
-ws.readyState !== 1) &&
-!editingId
-){
-
-load();
-
-}
-
-},5000);
+if((!ws || ws.readyState !== 1) && !editingId) load();
+}, 5000);
 
 </script>
 
