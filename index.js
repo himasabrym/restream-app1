@@ -173,6 +173,13 @@ const channels = {
     logo: "kids3.png",
     category: "أطفال",
     watchUrl: ""
+  },
+  ch12: {
+    input: "https://blc2cr.linkip.org/live/90068_.m3u8?play",
+    output: "rtmp://101.46.62.149/jaco/3027109747_1788989642243?anchorUid=3027109747&biz=0&countryCode=EG&key=1820525642243-cba23210caa77d074a7dd8101d086375&pbModeAttach=1&pbModeGap=3&presets=720P&pushFrom=obs&sid=64bbd2a699844a87942e5e630af7108d&src=1&transcodeEnabled=true",
+    logo: "kids3.png",
+    category: "أطفال",
+    watchUrl: ""
   }
 };
 
