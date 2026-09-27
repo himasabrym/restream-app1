@@ -98,8 +98,10 @@ const channels = {
     watchUrl: ""
   },
   ch1: {
-    input: "https://163.ostv.info/krikar/krikar/652333?token=ShJcU0BbQQNHDgxcBwYDCVsBAwdTV1FYCVdTAQABBAtUCAAHCwZTCAAbGBpEF0dcWF1vWQIXXlIJWlcFVEgRR0JVRm1aV0EDRwgBCgRWDAkbHBJED1gBQwtTVQFQXQQKBwUHHhFDCl1HA1pNWw8ZG1xIRFUUWwUNbgYHQQwHVhALXkFeXx9BVgtmUF1aAltdGwoSAUQZRghCEkANCxFfXh0SVltHQQJNABsOVkIPWRUbU19FCEEWGBNYQH40Rh8QVEhAV11AClYLGw4aQxAXFRtZQ28UUBcVQwcDWgAWEQgTABYeEV4CQTpaW1ZZBlZNUF9eQ0QPRlATTkBaCgpaRl5Ca0JaV0EDC0xYVEo=",
-    output: "rtmp://vsu.okcdn.ru/input/15037126680149_16572030782037_nwbfmzaoxm",
+    input: 
+      "http://core.itsall.pro/live/megapeer/PQubhxj8KGGKSLPAKS/261539.m3u8",
+    output: 
+      "rtmp://vsu.okcdn.ru/input/15037126680149_16572030782037_nwbfmzaoxm",
     logo: "logo1.png",
     category: "رياضة",
     watchUrl: "https://super-tvlive.vercel.app/SUPERTV_1.m3u8"
